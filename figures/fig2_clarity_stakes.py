@@ -86,12 +86,13 @@ cbar.ax.tick_params(length=0)
 cbar.outline.set_linewidth(0.5)
 
 # Title
-ax.set_title('Figure 2.  Clarity \u00d7 Stakes Scoring Matrix',
+ax.set_title('Clarity \u00d7 Stakes Scoring Matrix',
              fontsize=11, fontweight='bold', pad=12)
 
 fig.tight_layout()
 
-out = r'c:\Users\javierg\Documents\Javier Documents\BreviTest\Leos Guardian Angel Paper\figures'
+import os
+out = os.path.dirname(os.path.abspath(__file__))
 fig.savefig(f'{out}/fig2_clarity_stakes.png', dpi=300, facecolor='white')
 fig.savefig(f'{out}/fig2_clarity_stakes.pdf', facecolor='white')
 plt.close()

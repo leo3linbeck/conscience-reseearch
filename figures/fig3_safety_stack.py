@@ -108,10 +108,11 @@ ax.text(layer_x + layer_w/2, layers[0][0] - 0.35, 'Foundation',
         color=LEVEL1_EC, fontstyle='italic')
 
 # ── Title ────────────────────────────────────────────────────────────
-ax.text(5, 7.8, 'Figure 3.  Three-Level Safety Stack (Subsidiarity Principle)',
+ax.text(5, 7.8, 'Three-Level Safety Stack (Subsidiarity Principle)',
         ha='center', va='center', fontsize=11, fontweight='bold', color=TEXT_DARK)
 
-out = r'c:\Users\javierg\Documents\Javier Documents\BreviTest\Leos Guardian Angel Paper\figures'
+import os
+out = os.path.dirname(os.path.abspath(__file__))
 fig.savefig(f'{out}/fig3_safety_stack.png', dpi=300, facecolor='white')
 fig.savefig(f'{out}/fig3_safety_stack.pdf', facecolor='white')
 plt.close()

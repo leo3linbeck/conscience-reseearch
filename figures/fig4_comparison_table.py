@@ -1,5 +1,5 @@
 """
-Figure 4: Comparison Table — Top-Down Safety vs. Conscience Faculty
+Figure 4: Comparison Table — Top-Down Safety vs. Conscience Simulator Module
 Publication-quality table figure for Philosophy & Technology (Springer)
 """
 import matplotlib.pyplot as plt
@@ -16,7 +16,7 @@ plt.rcParams.update({
 })
 
 # ── Table data ───────────────────────────────────────────────────────
-columns = ['Feature', 'Top-Down Safety', 'Conscience Faculty']
+columns = ['Feature', 'Top-Down Safety', 'Conscience Simulator Module']
 data = [
     ['Authority locus',
      'Central regulatory body\nor vendor',
@@ -97,11 +97,12 @@ for i, row in enumerate(data):
                   cell, fc, TEXT_DARK, fontsize=fs, fontweight=fw)
 
 # ── Title ────────────────────────────────────────────────────────────
-ax.text(0.5, 0.99, 'Figure 4.  Comparison: Top-Down Safety vs. Conscience Faculty',
+ax.text(0.5, 0.99, 'Comparison: Top-Down Safety vs. Conscience Simulator Module',
         ha='center', va='bottom', fontsize=11, fontweight='bold',
         color=TEXT_DARK, transform=ax.transAxes)
 
-out = r'c:\Users\javierg\Documents\Javier Documents\BreviTest\Leos Guardian Angel Paper\figures'
+import os
+out = os.path.dirname(os.path.abspath(__file__))
 fig.savefig(f'{out}/fig4_comparison_table.png', dpi=300, facecolor='white')
 fig.savefig(f'{out}/fig4_comparison_table.pdf', facecolor='white')
 plt.close()

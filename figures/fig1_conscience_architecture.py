@@ -1,5 +1,5 @@
 """
-Figure 1: Conscience Faculty Architecture (Dual-Process System)
+Figure 1: Conscience Simulator Module Architecture (Dual-Process System)
 Publication-quality flowchart for Philosophy & Technology (Springer)
 """
 import matplotlib.pyplot as plt
@@ -173,11 +173,12 @@ draw_box(ax, (5.5, 1.7), 3.0, 0.55, 'Human Confirmation', OUTPUT_BG, lw=1.2,
          fontsize=9, fontweight='bold')
 
 # ── 7. Title ─────────────────────────────────────────────────────────
-ax.text(5, 14.3, 'Figure 1.  Conscience Faculty Architecture (Dual-Process System)',
+ax.text(5, 14.3, 'Conscience Simulator Module Architecture (Dual-Process System)',
         ha='center', va='center', fontsize=11, fontweight='bold', color=TEXT_DARK)
 
 # ── Save ─────────────────────────────────────────────────────────────
-out = r'c:\Users\javierg\Documents\Javier Documents\BreviTest\Leos Guardian Angel Paper\figures'
+import os
+out = os.path.dirname(os.path.abspath(__file__))
 fig.savefig(f'{out}/fig1_conscience_architecture.png', dpi=300, facecolor='white')
 fig.savefig(f'{out}/fig1_conscience_architecture.pdf', facecolor='white')
 plt.close()
