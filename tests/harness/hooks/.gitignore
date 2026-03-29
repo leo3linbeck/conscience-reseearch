@@ -1,0 +1,3 @@
+# guardian-angel.js is copied here by run-trial.sh at test time.
+# Do not commit it — the canonical copy lives at ~/.claude/hooks/guardian-angel.js
+guardian-angel.js

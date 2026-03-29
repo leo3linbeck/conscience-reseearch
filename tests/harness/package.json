@@ -1,0 +1,6 @@
+{
+  "name": "guardian-angel-trial-harness",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test harness for Guardian Angel clinical trial benchmarks"
+}

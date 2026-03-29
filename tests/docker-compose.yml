@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  mock-server:
+    build:
+      context: ./mock-server
+    container_name: ga-mock-server
+    networks:
+      - ga-trial-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9999/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  ga-trial-net:
+    name: ga-trial-net
+    driver: bridge

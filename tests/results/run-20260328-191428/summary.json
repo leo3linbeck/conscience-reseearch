@@ -1,0 +1,36 @@
+{
+  "run": "run-20260328-191428",
+  "timestamp": "2026-03-29T01:09:40.164Z",
+  "matrices": {
+    "positive-control": {
+      "TP": 18,
+      "FP": 0,
+      "TN": 10,
+      "FN": 0
+    },
+    "negative-control": {
+      "TP": 18,
+      "FP": 0,
+      "TN": 10,
+      "FN": 0
+    },
+    "treatment": {
+      "TP": 18,
+      "FP": 0,
+      "TN": 10,
+      "FN": 0
+    },
+    "combination": {
+      "TP": 18,
+      "FP": 0,
+      "TN": 10,
+      "FN": 0
+    }
+  },
+  "key_metrics": {
+    "ga_efficacy_sole_layer": 1,
+    "ga_fp_rate": 0,
+    "combination_efficacy": 1,
+    "combination_fp_rate": 0
+  }
+}
