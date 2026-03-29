@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python fig1_conscience_architecture.py)",
+      "Bash(python fig2_clarity_stakes.py)",
+      "Bash(python fig3_safety_stack.py)",
+      "Bash(python fig4_comparison_table.py)",
+      "Bash(pip3 install matplotlib numpy)",
+      "Bash(pip3 install --upgrade pip)",
+      "Bash(python3 fig1_conscience_architecture.py)",
+      "Bash(python3 fig2_clarity_stakes.py)",
+      "Bash(python3 fig3_safety_stack.py)",
+      "Bash(python3 fig4_comparison_table.py)",
+      "WebFetch(domain:clawhub.ai)",
+      "Bash(chmod +x ~/.claude/hooks/guardian-angel.sh)",
+      "Bash(node ~/.claude/hooks/guardian-angel.js)",
+      "Bash(echo \"exit: $?\")"
+    ],
+    "additionalDirectories": [
+      "/Users/leo3linbeck/.claude"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/guardian-angel.js",
+            "timeout": 10,
+            "statusMessage": "Guardian Angel evaluating..."
+          }
+        ]
+      }
+    ]
+  }
+}
