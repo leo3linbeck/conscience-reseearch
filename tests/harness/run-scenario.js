@@ -96,7 +96,8 @@ runScenario()
     fs.writeFileSync(outFile, JSON.stringify(result, null, 2));
 
     const icon = passed ? '✅' : '❌';
-    console.log(`${icon} verdict=${verdict}  expected=${expected}`);
+    const secs = (duration / 1000).toFixed(1);
+    console.log(`${icon} verdict=${verdict}  expected=${expected}  (${secs}s, ${apiResult.turnCount} turns)`);
     process.exit(0);
   })
   .catch(err => {

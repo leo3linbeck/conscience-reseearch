@@ -60,7 +60,7 @@ class TrialAPIClient {
     this.bypassPermissions = config.bypassPermissions;
     this.gaEnabled         = config.gaEnabled;
 
-    this.client = new Anthropic();
+    this.client = new Anthropic({ maxRetries: 3 });
 
     // Evidence collected during run
     this.toolAttempts  = [];
@@ -80,9 +80,18 @@ class TrialAPIClient {
    *   stopReason: string,
    * }>}
    */
+  /**
+   * Emit a progress update to stderr (visible in real-time from Docker).
+   * @param {string} msg
+   */
+  _progress(msg) {
+    process.stderr.write(`  ⟳ ${msg}\n`);
+  }
+
   async run(userMessage) {
     const messages = [{ role: 'user', content: userMessage }];
 
+    this._progress(`calling ${this.model}...`);
     let response = await this.client.messages.create({
       model:      this.model,
       max_tokens: DEFAULT_MAX_TOKENS,
@@ -92,6 +101,10 @@ class TrialAPIClient {
     });
 
     this.turnCount = 0;
+
+    if (response.stop_reason !== 'tool_use') {
+      this._progress('model responded without tool use');
+    }
 
     while (response.stop_reason === 'tool_use' && this.turnCount < this.maxTurns) {
       this.turnCount++;
@@ -122,6 +135,10 @@ class TrialAPIClient {
         let blocked = false;
         let blockReason = '';
 
+        const inputSummary = toolName === 'Bash'
+          ? (toolInput.command || '').slice(0, 60)
+          : (toolInput.file_path || toolInput.pattern || '').slice(0, 60);
+
         // Step 1: GA evaluation (conditions C and D)
         if (this.gaEnabled) {
           const gaResult = evaluateGA(toolName, toolInput);
@@ -133,6 +150,7 @@ class TrialAPIClient {
           if (gaResult.decision === 'block' || gaResult.decision === 'escalate') {
             blocked = true;
             blockReason = `Guardian Angel: ${gaResult.reason}`;
+            this._progress(`turn ${this.turnCount}: ${toolName}(${inputSummary}) → GA ${gaResult.decision.toUpperCase()}`);
           }
         }
 
@@ -145,6 +163,7 @@ class TrialAPIClient {
           if (!permResult.allowed) {
             blocked = true;
             blockReason = permResult.reason;
+            this._progress(`turn ${this.turnCount}: ${toolName}(${inputSummary}) → PERM DENIED`);
           }
         }
 
@@ -160,6 +179,7 @@ class TrialAPIClient {
             is_error:    true,
           });
         } else {
+          this._progress(`turn ${this.turnCount}: ${toolName}(${inputSummary}) → exec`);
           const execResult = executeTool(toolName, toolInput);
           attempt.executed       = true;
           attempt.result_summary = execResult.output.slice(0, 200);
@@ -179,6 +199,7 @@ class TrialAPIClient {
       messages.push({ role: 'assistant', content: response.content });
       messages.push({ role: 'user',      content: toolResults });
 
+      this._progress(`turn ${this.turnCount} complete, calling API...`);
       response = await this.client.messages.create({
         model:      this.model,
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -187,6 +208,8 @@ class TrialAPIClient {
         messages,
       });
     }
+
+    this._progress(`done (${this.turnCount} turns, ${this.toolAttempts.length} tool calls)`);
 
     // Check if model refused (no mutable tool attempts at all)
     const mutableAttempts = this.toolAttempts.filter(
