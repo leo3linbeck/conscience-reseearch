@@ -35,6 +35,19 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# ── Ctrl-C cleanup: stop all trial containers on interrupt ────────────
+cleanup_on_interrupt() {
+  echo ""
+  echo -e "${RED}Interrupted — stopping containers...${NC}"
+  docker ps --filter "ancestor=guardian-angel-trial" -q | xargs -r docker stop -t 2 2>/dev/null
+  docker ps --filter "ancestor=guardian-angel-mock" -q | xargs -r docker stop -t 2 2>/dev/null
+  # Kill any background worker processes
+  kill 0 2>/dev/null || true
+  echo "Done."
+  exit 130
+}
+trap cleanup_on_interrupt INT TERM
+
 # ── Argument parsing ──────────────────────────────────────────────────
 CONDITION_FILTER=""
 SCENARIO_FILTER=""
@@ -115,10 +128,12 @@ fi
 mkdir -p "$RAW_DIR"
 
 # ── Step 1: Build images ─────────────────────────────────────────────
-echo "[1/3] Building Docker images..."
-DOCKER_BUILDKIT=1 docker build -t guardian-angel-trial "$SCRIPT_DIR" -q
+echo "[1/3] Building Docker images (first run installs dependencies — may take a minute)..."
+echo ""
+DOCKER_BUILDKIT=1 docker build -t guardian-angel-trial "$SCRIPT_DIR" --progress=plain 2>&1
+echo ""
 echo "      ✓ guardian-angel-trial"
-DOCKER_BUILDKIT=1 docker build -t guardian-angel-mock "$SCRIPT_DIR/mock-server" -q
+DOCKER_BUILDKIT=1 docker build -t guardian-angel-mock "$SCRIPT_DIR/mock-server" --progress=plain 2>&1
 echo "      ✓ guardian-angel-mock"
 
 # ── Step 2: Set up network ───────────────────────────────────────────
@@ -138,8 +153,14 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
   # Start mock server
   docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
   docker run -d --name "$MOCK_CONTAINER" --network "$NETWORK" guardian-angel-mock &>/dev/null
-  for i in $(seq 1 10); do
-    docker exec "$MOCK_CONTAINER" wget -qO- http://localhost:9999/health &>/dev/null 2>&1 && break
+  MOCK_IP=""
+  for i in $(seq 1 15); do
+    if [[ -z "$MOCK_IP" ]]; then
+      MOCK_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MOCK_CONTAINER" 2>/dev/null || true)
+    fi
+    if [[ -n "$MOCK_IP" ]] && curl -sf "http://$MOCK_IP:9999/health" &>/dev/null; then
+      break
+    fi
     sleep 1
   done
 
@@ -148,15 +169,20 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
 
   PASS=0; FAIL=0
   for CONDITION in "${CONDS[@]}"; do
-    printf "  %-55s × %-20s " "$SCENARIO_FILTER" "$CONDITION"
+    echo ""
+    echo -e "  ${CYAN}$SCENARIO_FILTER × $CONDITION${NC}"
     DOCKER_ENV=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" -e "CONDITION=$CONDITION" -e "SCENARIO_FILE=$SCENARIO_FILTER" -e "MOCK_SERVER_URL=http://$MOCK_CONTAINER:9999")
     [[ -n "$MODEL_OVERRIDE" ]] && DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
 
+    # Stream both stdout and stderr to terminal in real-time
     EXIT_CODE=0
-    STDOUT=$(docker run --rm --network "$NETWORK" "${DOCKER_ENV[@]}" -v "$SCENARIO_PATH:/scenarios/$SCENARIO_FILTER:ro" -v "$RAW_DIR:/results" guardian-angel-trial 2>&2) || EXIT_CODE=$?
-    LAST_LINE=$(echo "$STDOUT" | tail -1)
-    if [[ $EXIT_CODE -eq 0 ]]; then echo "$LAST_LINE"; ((PASS++)) || true
-    else echo -e "${RED}ERROR${NC}"; ((FAIL++)) || true; fi
+    docker run --rm --init --network "$NETWORK" "${DOCKER_ENV[@]}" \
+      -v "$SCENARIO_PATH:/scenarios/$SCENARIO_FILTER:ro" \
+      -v "$RAW_DIR:/results" \
+      guardian-angel-trial || EXIT_CODE=$?
+
+    if [[ $EXIT_CODE -eq 0 ]]; then ((PASS++)) || true
+    else echo -e "${RED}  ERROR (exit $EXIT_CODE)${NC}"; ((FAIL++)) || true; fi
   done
 
   docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
@@ -171,56 +197,65 @@ elif [[ "$PARALLEL" == "true" ]]; then
     CATEGORY="${SCENARIO_DIRS[$i]}"
     MOCK_PORT=$((10000 + i))
     LOG_FILE="$RUN_DIR/${CATEGORY}.log"
+    EXIT_FILE="$RUN_DIR/.exit-${CATEGORY}"
     WORKER_LOGS+=("$LOG_FILE")
 
-    echo -e "  ${CYAN}▶ Starting worker: $CATEGORY (mock port $MOCK_PORT)${NC}"
+    echo -e "  ${CYAN}▶ Starting worker: $CATEGORY${NC}"
 
-    # Launch worker in background, capture output to log file
-    bash "$SCRIPT_DIR/run-category.sh" \
-      "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" \
-      > "$LOG_FILE" 2>&1 &
+    # Launch worker: stream to terminal with category prefix via sed -u (unbuffered),
+    # tee to log file for post-run analysis. Write exit code to a file since
+    # piping through sed/tee loses the original process exit status.
+    (
+      bash "$SCRIPT_DIR/run-category.sh" \
+        "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" 2>&1
+      echo $? > "$EXIT_FILE"
+    ) | sed -u "s/^/  [${CATEGORY}] /" | tee "$LOG_FILE" &
 
     WORKER_PIDS+=($!)
     ((ACTIVE++)) || true
 
     # Throttle if max-parallel is set
     if [[ $MAX_PARALLEL -gt 0 && $ACTIVE -ge $MAX_PARALLEL ]]; then
-      # Wait for any worker to finish before starting next
       wait -n "${WORKER_PIDS[@]}" 2>/dev/null || true
       ((ACTIVE--)) || true
     fi
   done
 
   echo ""
-  echo "  Waiting for ${#WORKER_PIDS[@]} workers to complete..."
-  echo "  (logs: $RUN_DIR/<category>.log)"
+  echo -e "  ${CYAN}Workers running... output streams below.${NC}"
   echo ""
 
-  # Wait for all workers and collect results
+  # Wait for all pipeline processes to complete
+  for PID in "${WORKER_PIDS[@]}"; do
+    wait "$PID" 2>/dev/null || true
+  done
+
+  echo ""
+
+  # Check exit codes from status files
   WORKER_FAILURES=0
-  for j in "${!WORKER_PIDS[@]}"; do
-    PID="${WORKER_PIDS[$j]}"
-    CATEGORY="${SCENARIO_DIRS[$j]}"
-    LOG="${WORKER_LOGS[$j]}"
-
-    if wait "$PID"; then
-      echo -e "  ${GREEN}✓ $CATEGORY completed successfully${NC}"
+  for i in "${!SCENARIO_DIRS[@]}"; do
+    CATEGORY="${SCENARIO_DIRS[$i]}"
+    EXIT_FILE="$RUN_DIR/.exit-${CATEGORY}"
+    if [[ -f "$EXIT_FILE" ]]; then
+      EC=$(cat "$EXIT_FILE")
+      if [[ "$EC" == "0" ]]; then
+        echo -e "  ${GREEN}✓ $CATEGORY completed successfully${NC}"
+      else
+        echo -e "  ${RED}✗ $CATEGORY had failures${NC}"
+        ((WORKER_FAILURES++)) || true
+      fi
+      rm -f "$EXIT_FILE"
     else
-      echo -e "  ${RED}✗ $CATEGORY had failures${NC}"
-      ((WORKER_FAILURES++)) || true
+      echo -e "  ${YELLOW}? $CATEGORY — no exit status (may still be finishing)${NC}"
     fi
-
-    # Print summary line from log
-    SUMMARY=$(tail -1 "$LOG" 2>/dev/null || echo "")
-    [[ -n "$SUMMARY" ]] && echo "    $SUMMARY"
   done
 
   PASS=0; FAIL=0
-  # Count results from log files
   for LOG in "${WORKER_LOGS[@]}"; do
     if [[ -f "$LOG" ]]; then
-      P=$(grep -c '✅\|verdict=' "$LOG" 2>/dev/null || echo 0)
-      F=$(grep -c 'ERROR' "$LOG" 2>/dev/null || echo 0)
+      P=$(grep -c '✅\|verdict=' "$LOG" 2>/dev/null) || P=0
+      F=$(grep -c 'ERROR' "$LOG" 2>/dev/null) || F=0
       ((PASS += P)) || true
       ((FAIL += F)) || true
     fi

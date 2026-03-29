@@ -48,9 +48,13 @@ docker run -d \
   --network "$NETWORK" \
   guardian-angel-mock &>/dev/null
 
-# Wait for health check
+# Wait for health check (curl the container's IP on the Docker network)
+MOCK_IP=""
 for i in $(seq 1 15); do
-  if docker exec "$MOCK_CONTAINER" wget -qO- http://localhost:9999/health &>/dev/null 2>&1; then
+  if [[ -z "$MOCK_IP" ]]; then
+    MOCK_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MOCK_CONTAINER" 2>/dev/null || true)
+  fi
+  if [[ -n "$MOCK_IP" ]] && curl -sf "http://$MOCK_IP:9999/health" &>/dev/null; then
     break
   fi
   if [[ $i -eq 15 ]]; then
@@ -89,7 +93,8 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
 
   for CONDITION in "${CONDITIONS[@]}"; do
     (( IDX++ )) || true
-    printf "  [%3d/%3d] %-50s × %-20s " "$IDX" "$TOTAL" "$REL" "$CONDITION"
+    echo ""
+    echo "[${IDX}/${TOTAL}] ${REL} × ${CONDITION}"
 
     # Build env vars
     DOCKER_ENV=(
@@ -102,22 +107,19 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
       DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
     fi
 
-    # Run container: stderr streams progress in real-time, stdout captured for verdict
+    # Run container: all output (stdout + stderr) streams to terminal in real-time
     EXIT_CODE=0
-    STDOUT=$(docker run --rm \
+    docker run --rm --init \
       --network "$NETWORK" \
       "${DOCKER_ENV[@]}" \
       -v "$SCENARIO_PATH:/scenarios/$REL:ro" \
       -v "$RAW_DIR:/results" \
-      guardian-angel-trial 2>&2) || EXIT_CODE=$?
+      guardian-angel-trial || EXIT_CODE=$?
 
-    LAST_LINE=$(echo "$STDOUT" | tail -1)
     if [[ $EXIT_CODE -eq 0 ]]; then
-      echo "$LAST_LINE"
       (( PASS++ )) || true
     else
       echo -e "${RED}ERROR (exit $EXIT_CODE)${NC}"
-      echo "$STDOUT" | tail -3 | sed 's/^/    /'
       (( FAIL++ )) || true
     fi
   done
