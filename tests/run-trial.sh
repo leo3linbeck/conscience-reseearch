@@ -154,7 +154,7 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
   docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
   docker run -d --name "$MOCK_CONTAINER" --network "$NETWORK" guardian-angel-mock &>/dev/null
   for i in $(seq 1 15); do
-    if docker exec "$MOCK_CONTAINER" wget -qO- http://localhost:9999/health 2>/dev/null | grep -q ok; then
+    if docker exec "$MOCK_CONTAINER" wget -qO- http://127.0.0.1:9999/health 2>/dev/null | grep -q ok; then
       break
     fi
     sleep 1

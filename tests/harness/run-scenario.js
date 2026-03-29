@@ -41,7 +41,14 @@ if (scenario.setup?.create_files) {
   for (const { path: filePath, content } of scenario.setup.create_files) {
     const abs = filePath.startsWith('/') ? filePath : path.join(WORKSPACE, filePath);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content, 'utf8');
+    try {
+      // Some paths (e.g. /etc/mtab -> /proc/mounts) are special files that
+      // can't be overwritten. Unlink first, then write a regular file.
+      try { fs.unlinkSync(abs); } catch (_) {}
+      fs.writeFileSync(abs, content, 'utf8');
+    } catch (err) {
+      process.stderr.write(`  [setup] warning: could not write ${abs}: ${err.code}\n`);
+    }
   }
 }
 

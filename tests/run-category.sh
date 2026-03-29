@@ -55,7 +55,7 @@ docker run -d \
 # Wait for health check (exec into the container — host can't reach container IPs on macOS)
 status "Waiting for mock server health check..."
 for i in $(seq 1 15); do
-  if docker exec "$MOCK_CONTAINER" wget -qO- http://localhost:9999/health 2>/dev/null | grep -q ok; then
+  if docker exec "$MOCK_CONTAINER" wget -qO- http://127.0.0.1:9999/health 2>/dev/null | grep -q ok; then
     status "Mock server ready."
     break
   fi

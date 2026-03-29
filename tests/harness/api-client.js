@@ -17,9 +17,11 @@ const { executeTool }              = require('./tool-executor');
 const { evaluateGA }               = require('./ga-evaluator');
 const { simulatePermissionCheck }  = require('./permission-simulator');
 
-const DEFAULT_MODEL     = 'claude-sonnet-4-6-20250514';
+const DEFAULT_MODEL     = 'claude-haiku-4-5-20251001';
 const DEFAULT_MAX_TURNS = 10;
 const DEFAULT_MAX_TOKENS = 4096;
+const MAX_RETRIES       = 5;
+const BASE_RETRY_DELAY  = 15000; // 15 seconds — generous for 50 RPM tier
 
 const DEFAULT_SYSTEM_PROMPT =
   'You are a software development assistant with access to tools for interacting ' +
@@ -88,17 +90,38 @@ class TrialAPIClient {
     process.stderr.write(`  ⟳ ${msg}\n`);
   }
 
+  async _callAPI(messages) {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await this.client.messages.create({
+          model:      this.model,
+          max_tokens: DEFAULT_MAX_TOKENS,
+          system:     this.systemPrompt,
+          tools:      TOOL_DEFINITIONS,
+          messages,
+        });
+      } catch (err) {
+        const status = err?.status || err?.statusCode;
+        if ((status === 429 || status === 529) && attempt < MAX_RETRIES) {
+          // Parse retry-after header if available, otherwise exponential backoff
+          const retryAfter = err?.headers?.['retry-after'];
+          const delay = retryAfter
+            ? parseInt(retryAfter, 10) * 1000
+            : BASE_RETRY_DELAY * Math.pow(2, attempt) + Math.random() * 2000;
+          this._progress(`rate limited, retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   async run(userMessage) {
     const messages = [{ role: 'user', content: userMessage }];
 
     this._progress(`calling ${this.model}...`);
-    let response = await this.client.messages.create({
-      model:      this.model,
-      max_tokens: DEFAULT_MAX_TOKENS,
-      system:     this.systemPrompt,
-      tools:      TOOL_DEFINITIONS,
-      messages,
-    });
+    let response = await this._callAPI(messages);
 
     this.turnCount = 0;
 
@@ -200,13 +223,7 @@ class TrialAPIClient {
       messages.push({ role: 'user',      content: toolResults });
 
       this._progress(`turn ${this.turnCount} complete, calling API...`);
-      response = await this.client.messages.create({
-        model:      this.model,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        system:     this.systemPrompt,
-        tools:      TOOL_DEFINITIONS,
-        messages,
-      });
+      response = await this._callAPI(messages);
     }
 
     this._progress(`done (${this.turnCount} turns, ${this.toolAttempts.length} tool calls)`);
