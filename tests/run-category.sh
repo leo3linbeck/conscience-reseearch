@@ -41,24 +41,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── Helper: status message (writes to both stdout and stderr for immediate flush) ──
+status() { echo "$*" >&2; echo "$*"; }
+
 # ── Start mock server ─────────────────────────────────────────────────
+status "Starting mock server ($MOCK_CONTAINER)..."
 docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
 docker run -d \
   --name "$MOCK_CONTAINER" \
   --network "$NETWORK" \
   guardian-angel-mock &>/dev/null
 
-# Wait for health check (curl the container's IP on the Docker network)
-MOCK_IP=""
+# Wait for health check (exec into the container — host can't reach container IPs on macOS)
+status "Waiting for mock server health check..."
 for i in $(seq 1 15); do
-  if [[ -z "$MOCK_IP" ]]; then
-    MOCK_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MOCK_CONTAINER" 2>/dev/null || true)
-  fi
-  if [[ -n "$MOCK_IP" ]] && curl -sf "http://$MOCK_IP:9999/health" &>/dev/null; then
+  if docker exec "$MOCK_CONTAINER" wget -qO- http://localhost:9999/health 2>/dev/null | grep -q ok; then
+    status "Mock server ready."
     break
   fi
   if [[ $i -eq 15 ]]; then
-    echo "ERROR: Mock server $MOCK_CONTAINER failed health check" >&2
+    status "ERROR: Mock server $MOCK_CONTAINER failed health check"
     exit 1
   fi
   sleep 1
@@ -68,7 +70,7 @@ done
 SCENARIOS=()
 SCENARIO_DIR="$SCRIPT_DIR/scenarios/$CATEGORY_DIR"
 if [[ ! -d "$SCENARIO_DIR" ]]; then
-  echo "ERROR: Scenario directory not found: $SCENARIO_DIR" >&2
+  status "ERROR: Scenario directory not found: $SCENARIO_DIR"
   exit 1
 fi
 
@@ -77,11 +79,12 @@ while IFS= read -r -d '' f; do
 done < <(find "$SCENARIO_DIR" -name "*.json" -print0 | sort -z)
 
 if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
-  echo "WARNING: No scenarios found in $SCENARIO_DIR" >&2
+  status "WARNING: No scenarios found in $SCENARIO_DIR"
   exit 0
 fi
 
 TOTAL=$(( ${#SCENARIOS[@]} * ${#CONDITIONS[@]} ))
+status "Found ${#SCENARIOS[@]} scenarios × ${#CONDITIONS[@]} conditions = $TOTAL runs"
 
 # ── Run scenarios ─────────────────────────────────────────────────────
 PASS=0
@@ -93,8 +96,9 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
 
   for CONDITION in "${CONDITIONS[@]}"; do
     (( IDX++ )) || true
-    echo ""
-    echo "[${IDX}/${TOTAL}] ${REL} × ${CONDITION}"
+    status ""
+    status "[${IDX}/${TOTAL}] ${REL} × ${CONDITION}"
+    status "  Starting container..."
 
     # Build env vars
     DOCKER_ENV=(
@@ -108,6 +112,7 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
     fi
 
     # Run container: all output (stdout + stderr) streams to terminal in real-time
+    START_TIME=$SECONDS
     EXIT_CODE=0
     docker run --rm --init \
       --network "$NETWORK" \
@@ -116,18 +121,21 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
       -v "$RAW_DIR:/results" \
       guardian-angel-trial || EXIT_CODE=$?
 
+    ELAPSED=$(( SECONDS - START_TIME ))
+
     if [[ $EXIT_CODE -eq 0 ]]; then
+      status "  ✅ Passed (${ELAPSED}s)"
       (( PASS++ )) || true
     else
-      echo -e "${RED}ERROR (exit $EXIT_CODE)${NC}"
+      status "  ❌ FAILED (exit $EXIT_CODE, ${ELAPSED}s)"
       (( FAIL++ )) || true
     fi
   done
 done
 
 # ── Summary ───────────────────────────────────────────────────────────
-echo ""
-echo "Category $CATEGORY_DIR complete: $PASS passed, $FAIL failed (of $TOTAL)"
+status ""
+status "═══ $CATEGORY_DIR complete: $PASS passed, $FAIL failed (of $TOTAL) ═══"
 
 # Exit with failure count (0 = all passed)
 [[ $FAIL -eq 0 ]]

@@ -153,12 +153,8 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
   # Start mock server
   docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
   docker run -d --name "$MOCK_CONTAINER" --network "$NETWORK" guardian-angel-mock &>/dev/null
-  MOCK_IP=""
   for i in $(seq 1 15); do
-    if [[ -z "$MOCK_IP" ]]; then
-      MOCK_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MOCK_CONTAINER" 2>/dev/null || true)
-    fi
-    if [[ -n "$MOCK_IP" ]] && curl -sf "http://$MOCK_IP:9999/health" &>/dev/null; then
+    if docker exec "$MOCK_CONTAINER" wget -qO- http://localhost:9999/health 2>/dev/null | grep -q ok; then
       break
     fi
     sleep 1
@@ -202,14 +198,11 @@ elif [[ "$PARALLEL" == "true" ]]; then
 
     echo -e "  ${CYAN}▶ Starting worker: $CATEGORY${NC}"
 
-    # Launch worker: stream to terminal with category prefix via sed -u (unbuffered),
-    # tee to log file for post-run analysis. Write exit code to a file since
-    # piping through sed/tee loses the original process exit status.
-    (
-      bash "$SCRIPT_DIR/run-category.sh" \
-        "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" 2>&1
-      echo $? > "$EXIT_FILE"
-    ) | sed -u "s/^/  [${CATEGORY}] /" | tee "$LOG_FILE" &
+    # Launch worker: run-category.sh's status() writes to both stdout and stderr.
+    # stdout goes to the log file. stderr goes to terminal (fd 2 is inherited, unbuffered).
+    bash "$SCRIPT_DIR/run-category.sh" \
+      "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" \
+      > "$LOG_FILE" &
 
     WORKER_PIDS+=($!)
     ((ACTIVE++)) || true
