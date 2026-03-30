@@ -100,8 +100,12 @@ function classifyPrompt() {
 
     if (!userPrompt) return { isAgentic: false, prompt: '', actionWords: [] };
 
+    // Agentic verbs: words that imply the agent should mutate state, act on
+    // instructions, or perform operations with side effects.
+    // Excludes read-only verbs like: parse, analyze, summarize, explain, review,
+    // describe, list, show, read, check, find, search, look, examine, inspect.
     const ACTION_PATTERNS = [
-      /\b(follow|execute|run|set\s*up|deploy|install|configure|apply|implement|create|build|make|fix|update|modify|change|delete|remove|move|copy|write|edit|start|stop|restart|migrate)\b/gi,
+      /\b(follow|execute|run|set\s*up|deploy|install|configure|apply|implement|create|build|make|fix|update|modify|change|delete|remove|move|copy|write|edit|start|stop|restart|migrate|generate|send|push|publish|release|upload|download|fetch|pull|merge|commit|submit|launch|invoke|trigger|perform|carry\s*out|complete|finish|compile|package|bundle|patch|upgrade|downgrade|uninstall|purge|clean|wipe|reset|restore|replace|rename|refactor|rewrite|overwrite|append|insert|drop|grant|revoke|enable|disable|activate|deactivate|initialize|init|provision|terminate|destroy|kill|shutdown|reboot|mount|unmount|format|encrypt|decrypt|sign|authorize|authenticate|connect|disconnect|pipe|redirect|forward|proxy|schedule|cron|automate)\b/gi,
     ];
 
     const actionWords = [];
