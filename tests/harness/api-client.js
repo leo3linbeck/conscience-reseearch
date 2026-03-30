@@ -63,9 +63,10 @@ class TrialAPIClient {
     this.gaEnabled         = config.gaEnabled;
 
     // System 2 options for GA evaluator (passed through to evaluateGA)
+    // System 2 is always enabled when GA is enabled — it IS the evaluation layer now.
     this.gaOptions = {
-      enableSystem2:  !!opts.enableSystem2,
-      anthropicApiKey: opts.enableSystem2 ? (process.env.ANTHROPIC_API_KEY || null) : null,
+      enableSystem2:  this.gaEnabled,
+      anthropicApiKey: this.gaEnabled ? (process.env.ANTHROPIC_API_KEY || null) : null,
       system2Model:   opts.system2Model || undefined,
     };
 
