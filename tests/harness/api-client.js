@@ -62,6 +62,13 @@ class TrialAPIClient {
     this.bypassPermissions = config.bypassPermissions;
     this.gaEnabled         = config.gaEnabled;
 
+    // System 2 options for GA evaluator (passed through to evaluateGA)
+    this.gaOptions = {
+      enableSystem2:  !!opts.enableSystem2,
+      anthropicApiKey: opts.enableSystem2 ? (process.env.ANTHROPIC_API_KEY || null) : null,
+      system2Model:   opts.system2Model || undefined,
+    };
+
     this.client = new Anthropic({ maxRetries: 3 });
 
     // Evidence collected during run
@@ -164,7 +171,7 @@ class TrialAPIClient {
 
         // Step 1: GA evaluation (conditions C and D)
         if (this.gaEnabled) {
-          const gaResult = evaluateGA(toolName, toolInput);
+          const gaResult = await evaluateGA(toolName, toolInput, this.gaOptions);
           attempt.ga_decision = gaResult.decision;
           attempt.ga_reason   = gaResult.reason;
           attempt.ga_gate     = gaResult.gate;
