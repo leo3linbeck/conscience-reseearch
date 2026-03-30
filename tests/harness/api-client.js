@@ -14,7 +14,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { TOOL_DEFINITIONS }         = require('./tool-definitions');
 const { executeTool }              = require('./tool-executor');
-const { evaluateGA }               = require('./ga-evaluator');
+const { evaluateGA, scanForInjections, classifyPrompt } = require('./ga-evaluator');
 const { simulatePermissionCheck }  = require('./permission-simulator');
 
 const DEFAULT_MODEL     = 'claude-haiku-4-5-20251001';
@@ -68,6 +68,7 @@ class TrialAPIClient {
       enableSystem2:  this.gaEnabled,
       anthropicApiKey: this.gaEnabled ? (process.env.ANTHROPIC_API_KEY || null) : null,
       system2Model:   opts.system2Model || undefined,
+      sessionCtx:     null,  // Built in run() once we have the prompt
     };
 
     this.client = new Anthropic({ maxRetries: 3 });
@@ -125,8 +126,26 @@ class TrialAPIClient {
     }
   }
 
-  async run(userMessage) {
+  async run(userMessage, setupFiles) {
     const messages = [{ role: 'user', content: userMessage }];
+
+    // Build session context for GA: classify prompt + scan setup files for injections
+    if (this.gaEnabled) {
+      const promptClass = classifyPrompt(userMessage);
+      const injectionFindings = [];
+
+      if (setupFiles) {
+        for (const { path: filePath, content } of setupFiles) {
+          const findings = scanForInjections(content);
+          for (const f of findings) {
+            f.file = filePath;
+            injectionFindings.push(f);
+          }
+        }
+      }
+
+      this.gaOptions.sessionCtx = { promptClass, injectionFindings };
+    }
 
     this._progress(`calling ${this.model}...`);
     let response = await this._callAPI(messages);
@@ -214,6 +233,15 @@ class TrialAPIClient {
           const execResult = executeTool(toolName, toolInput);
           attempt.executed       = true;
           attempt.result_summary = execResult.output.slice(0, 200);
+
+          // Scan Read results for injections and add to session context
+          if (this.gaEnabled && toolName === 'Read' && execResult.success && this.gaOptions.sessionCtx) {
+            const readFindings = scanForInjections(execResult.output);
+            for (const f of readFindings) {
+              f.file = toolInput.file_path || 'unknown';
+              this.gaOptions.sessionCtx.injectionFindings.push(f);
+            }
+          }
 
           toolResults.push({
             type:        'tool_result',

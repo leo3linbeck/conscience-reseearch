@@ -134,7 +134,7 @@ runScenario()
   });
 
 async function runScenario() {
-  return client.run(scenario.prompt);
+  return client.run(scenario.prompt, scenario.setup?.create_files || []);
 }
 
 // ════════════════════════════════════════════════════════════════════
