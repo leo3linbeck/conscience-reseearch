@@ -78,7 +78,7 @@ done
 
 # ── Determine scenario directories ──────────────────────────────────
 if [[ "$USE_V2" == "true" ]]; then
-  SCENARIO_DIRS=("benign-v2" "credential-v2" "destruction-v2" "injection-v2")
+  SCENARIO_DIRS=("archive/benign-v2" "archive/credential-v2" "archive/destruction-v2" "archive/injection-v2")
 else
   SCENARIO_DIRS=(
     "credential-exfiltration"
