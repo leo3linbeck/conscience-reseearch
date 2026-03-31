@@ -2,23 +2,25 @@
 /**
  * Guardian Angel — Install / Update Script
  *
- * Builds the production hook from the test system components and installs
- * it to ~/.claude/hooks/. The test system is the source of truth.
+ * Builds the production hook from test system components and installs
+ * to ~/.claude/hooks/. The test system is the source of truth.
  *
  * Usage:
- *   node guardian-angel/install.js          # install/update production hook
+ *   node guardian-angel/install.js          # install/update
  *   node guardian-angel/install.js --dry-run # show what would be installed
- *   node guardian-angel/install.js --diff    # show diff against current production
+ *   node guardian-angel/install.js --diff    # show what differs
  *
  * What gets installed:
  *   ~/.claude/hooks/guardian-angel.js        — the hook (System 1 + System 2)
- *   ~/.claude/hooks/ga-system2-prompt.txt    — the wrapper prompt (from tests/wrappers/default.txt)
+ *   ~/.claude/hooks/ga-system2-prompt.txt    — the wrapper prompt
  *   ~/.claude/hooks/ga-lib/                  — shared modules
- *     file-metadata.js                       — git status, sensitive patterns, staged changes
- *     file-resolver.js                       — reads scripts referenced by tool calls
+ *     file-metadata.js                       — git status, sensitive patterns
+ *     file-resolver.js                       — reads scripts for DAG flattening
  *
- * The hook loads the wrapper prompt from ga-system2-prompt.txt at runtime,
- * so you can update the prompt without touching the hook code.
+ * Architecture:
+ *   - guardian-angel.template.js is the IMMUTABLE template (never modified)
+ *   - install.js patches the template to load prompt from file + use ga-lib/
+ *   - The patched result is written to both production and repo hooks/ dir
  */
 'use strict';
 
@@ -26,35 +28,56 @@ const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 
-const REPO_ROOT    = path.join(__dirname, '..');
-const HOOKS_DIR    = path.join(os.homedir(), '.claude', 'hooks');
-const GA_LIB_DIR   = path.join(HOOKS_DIR, 'ga-lib');
+const REPO_ROOT     = path.join(__dirname, '..');
+const HOOKS_DIR     = path.join(os.homedir(), '.claude', 'hooks');
+const GA_LIB_DIR    = path.join(HOOKS_DIR, 'ga-lib');
+const TEMPLATE_PATH = path.join(__dirname, 'hooks', 'guardian-angel.template.js');
 
-const DRY_RUN = process.argv.includes('--dry-run');
+const DRY_RUN   = process.argv.includes('--dry-run');
 const SHOW_DIFF = process.argv.includes('--diff');
 
-// ── Source files ─────────────────────────────────────────────────────
-
+// ── Source paths ─────────────────────────────────────────────────────
 const WRAPPER_SRC = path.join(REPO_ROOT, 'tests', 'wrappers', 'default.txt');
+const GA_WRAPPER_SRC = path.join(REPO_ROOT, 'tests', 'harness', 'ga-wrapper.js');
+
+// ── Destination paths ────────────────────────────────────────────────
 const WRAPPER_DST = path.join(HOOKS_DIR, 'ga-system2-prompt.txt');
+const HOOK_DST    = path.join(HOOKS_DIR, 'guardian-angel.js');
+const REPO_HOOK   = path.join(__dirname, 'hooks', 'guardian-angel.js');
 
-// ── File metadata module (extracted from tests/harness/ga-wrapper.js) ─
+// ── Extract modules from test ga-wrapper.js ──────────────────────────
 
-const FILE_METADATA_SRC = `'use strict';
+function extractFromTestSource() {
+  const src = fs.readFileSync(GA_WRAPPER_SRC, 'utf8');
+
+  // Extract SENSITIVE_FILE_PATTERNS array
+  const patternsMatch = src.match(/const SENSITIVE_FILE_PATTERNS = \[([\s\S]*?)\];/);
+  const patternsStr = patternsMatch ? '[\n' + patternsMatch[1] + ']' : '[]';
+
+  // Extract DESTRUCTIVE_BASH_PATTERNS array
+  const destructiveMatch = src.match(/const DESTRUCTIVE_BASH_PATTERNS = \[([\s\S]*?)\];/);
+  const destructiveStr = destructiveMatch ? '[\n' + destructiveMatch[1] + ']' : '[]';
+
+  // Extract ALWAYS_ESCALATE_TOOLS
+  const escalateMatch = src.match(/const ALWAYS_ESCALATE_TOOLS = new Set\(([\s\S]*?)\);/);
+  const escalateStr = escalateMatch ? escalateMatch[1].trim() : '/* populate as needed */ []';
+
+  return { patternsStr, destructiveStr, escalateStr };
+}
+
+// ── Build file-metadata.js ───────────────────────────────────────────
+
+function buildFileMetadata() {
+  const { patternsStr } = extractFromTestSource();
+
+  return `'use strict';
 
 const fs   = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-// Sensitive file patterns — files matching these warrant higher stakes.
-// Extend this array to add new categories.
-const SENSITIVE_FILE_PATTERNS = ${fs.existsSync(path.join(REPO_ROOT, 'tests', 'harness', 'ga-wrapper.js'))
-  ? extractSensitivePatterns()
-  : '[]'};
+const SENSITIVE_FILE_PATTERNS = ${patternsStr};
 
-/**
- * Resolve file metadata for Write/Edit tool calls.
- */
 function resolveFileMetadata(toolName, toolInput) {
   const filePath = toolInput.file_path;
   if (!filePath) return null;
@@ -105,22 +128,22 @@ function resolveFileMetadata(toolName, toolInput) {
 
 module.exports = { resolveFileMetadata, SENSITIVE_FILE_PATTERNS };
 `;
+}
 
-// ── File resolver module (extracted from tests/harness/ga-wrapper.js) ─
+// ── Build file-resolver.js ───────────────────────────────────────────
 
-const FILE_RESOLVER_SRC = `'use strict';
+function buildFileResolver() {
+  return `'use strict';
 
 const fs = require('fs');
 
 const MAX_FILE_SIZE = 10000;
 
-/**
- * Extract file paths referenced by a Bash tool call and read their contents.
- * Enables DAG flattening for script execution.
- */
 function resolveReferencedFiles(toolName, toolInput) {
-  const results = [];
-  if (toolName !== 'Bash') return results;
+  const files = [];
+  const unresolved = [];
+
+  if (toolName !== 'Bash') return { files, unresolved };
 
   const cmd = toolInput.command || '';
   const patterns = [
@@ -136,13 +159,23 @@ function resolveReferencedFiles(toolName, toolInput) {
       if (!seen.has(filePath)) {
         seen.add(filePath);
         const content = readFileSafe(filePath);
-        if (content !== null) {
-          results.push({ filePath, content });
-        }
+        if (content !== null) { files.push({ filePath, content }); }
+        else { unresolved.push(filePath); }
       }
     }
   }
-  return results;
+
+  if (seen.size === 0) {
+    const bareMatch = cmd.match(/^\\s*(\\/[^\\s;|&]+\\.(?:sh|bash|py|rb|pl|js))\\b/);
+    if (bareMatch) {
+      const filePath = bareMatch[1];
+      const content = readFileSafe(filePath);
+      if (content !== null) { files.push({ filePath, content }); }
+      else { unresolved.push(filePath); }
+    }
+  }
+
+  return { files, unresolved };
 }
 
 function readFileSafe(filePath) {
@@ -158,45 +191,37 @@ function readFileSafe(filePath) {
 
 module.exports = { resolveReferencedFiles };
 `;
-
-// ── Extract SENSITIVE_FILE_PATTERNS from test source ─────────────────
-
-function extractSensitivePatterns() {
-  const src = fs.readFileSync(
-    path.join(REPO_ROOT, 'tests', 'harness', 'ga-wrapper.js'), 'utf8'
-  );
-  const match = src.match(/const SENSITIVE_FILE_PATTERNS = \[([\s\S]*?)\];/);
-  if (!match) return '[]';
-  return '[\n' + match[1] + ']';
 }
 
-// ── Build the production hook ────────────────────────────────────────
+// ── Build the production hook from the IMMUTABLE template ────────────
 
 function buildProductionHook() {
-  const currentHook = fs.readFileSync(
-    path.join(REPO_ROOT, 'guardian-angel', 'hooks', 'guardian-angel.js'), 'utf8'
-  );
+  if (!fs.existsSync(TEMPLATE_PATH)) {
+    console.error(`Template not found: ${TEMPLATE_PATH}`);
+    console.error('The template is the immutable base hook. It should never be deleted.');
+    process.exit(1);
+  }
 
-  // Replace the embedded SYSTEM2_PROMPT with a file-loading version
+  let hook = fs.readFileSync(TEMPLATE_PATH, 'utf8');
+  const { destructiveStr, escalateStr } = extractFromTestSource();
+
+  // 1. Replace embedded SYSTEM2_PROMPT with file loader
   const promptLoadCode = `const SYSTEM2_PROMPT = (() => {
   const promptPath = require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-system2-prompt.txt');
   try { return require('fs').readFileSync(promptPath, 'utf8'); }
   catch { return null; }
 })()`;
 
-  // Find the SYSTEM2_PROMPT declaration (multiline template string)
-  const promptStart = currentHook.indexOf("const SYSTEM2_PROMPT = `");
-  const promptEnd = currentHook.indexOf("`;", promptStart) + 2;
-
+  const promptStart = hook.indexOf("const SYSTEM2_PROMPT = `");
+  const promptEnd = hook.indexOf("`;", promptStart) + 2;
   if (promptStart === -1 || promptEnd <= 2) {
-    console.error('Could not find SYSTEM2_PROMPT in hook source.');
+    console.error('Could not find SYSTEM2_PROMPT template string in template.');
     process.exit(1);
   }
+  hook = hook.slice(0, promptStart) + promptLoadCode + hook.slice(promptEnd);
 
-  let hook = currentHook.slice(0, promptStart) + promptLoadCode + currentHook.slice(promptEnd);
-
-  // Inject file metadata and file resolver into System 2 user message builder
-  const requireLines = `
+  // 2. Inject ga-lib requires + destructive patterns + always-escalate after SYSTEM2_MODEL
+  const injectCode = `
 // ── GA lib modules (installed by guardian-angel/install.js) ───────────
 const { resolveFileMetadata } = (() => {
   try { return require(require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-lib', 'file-metadata.js')); }
@@ -204,42 +229,54 @@ const { resolveFileMetadata } = (() => {
 })();
 const { resolveReferencedFiles } = (() => {
   try { return require(require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-lib', 'file-resolver.js')); }
-  catch { return { resolveReferencedFiles: () => [] }; }
+  catch { return { resolveReferencedFiles: (t, i) => ({ files: [], unresolved: [] }) }; }
 })();
+
+// Destructive bash commands — System 1 escalates for user approval
+const DESTRUCTIVE_BASH_PATTERNS = ${destructiveStr};
+
+// Tools that always require escalation
+const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
 `;
 
-  // Insert after the config section (after SYSTEM2_MODEL line)
-  const insertPoint = hook.indexOf("const SYSTEM2_MODEL");
-  const insertAfter = hook.indexOf('\n', insertPoint) + 1;
-  hook = hook.slice(0, insertAfter) + requireLines + hook.slice(insertAfter);
+  const modelLine = hook.indexOf("const SYSTEM2_MODEL");
+  const afterModelLine = hook.indexOf('\n', modelLine) + 1;
+  hook = hook.slice(0, afterModelLine) + injectCode + hook.slice(afterModelLine);
 
-  // Modify buildSystem2UserMessage to include file metadata and referenced files
-  const oldBuilder = `function buildSystem2UserMessage(promptClass) {
-  const sections = [
-    \`Tool call requiring moral evaluation:\`,
-    \`\`,
-    \`TOOL: \${toolName}\`,
-    \`INPUT: \${JSON.stringify(toolInput, null, 2)}\`,
-  ];
-
-  if (promptClass && promptClass.prompt) {
-    sections.push(
-      \`\`,
-      \`## User's Prompt\`,
-      \`"\${promptClass.prompt}"\`,
-      \`Classification: \${promptClass.isAgentic ? 'AGENTIC' : 'INFORMATIONAL'}\${promptClass.actionWords.length > 0 ? ' (action words: ' + promptClass.actionWords.join(', ') + ')' : ''}\`,
-    );
-  }
-
-  sections.push(
-    \`\`,
-    \`Evaluate this action through the Thomistic conscience framework. Compute the Gate V score (Clarity x Stakes) and return your JSON decision.\`,
+  // 3. Replace ALWAYS_BLOCK with ALWAYS_ESCALATE in System 1 logic
+  hook = hook.replace(
+    /const ALWAYS_BLOCK = new Set\(\/\* populate as needed \*\/ \[\]\);/,
+    '// ALWAYS_BLOCK replaced by ALWAYS_ESCALATE_TOOLS (injected above)'
+  );
+  hook = hook.replace(
+    /if \(ALWAYS_BLOCK\.has\(toolName\)\) \{/,
+    'if (ALWAYS_ESCALATE_TOOLS.has(toolName)) {'
   );
 
-  return sections.join('\\n');
-}`;
+  // 4. Add destructive bash check in System 1 (before System 2)
+  const system2Comment = '  // ════════════════════════════════════════════════════════════════════\n  // SYSTEM 2';
+  const s2Idx = hook.indexOf(system2Comment);
+  if (s2Idx !== -1) {
+    const destructiveCheck = `
+  // ── System 1: Step 4 — destructive bash commands ──────────────────
+  if (toolName === 'Bash') {
+    const cmd = String(toolInput.command || '').trimStart();
+    for (const pattern of DESTRUCTIVE_BASH_PATTERNS) {
+      if (pattern.test(cmd)) {
+        escalate(\`Destructive command detected: requires user approval\`,
+                 'n/a', 'n/a', 'destructive-bash', coherence, affective, provenance);
+      }
+    }
+  }
 
-  const newBuilder = `function buildSystem2UserMessage(promptClass) {
+`;
+    hook = hook.slice(0, s2Idx) + destructiveCheck + hook.slice(s2Idx);
+  }
+
+  // 5. Patch buildSystem2UserMessage to include file metadata + resolved files + unresolved escalation
+  const oldMsgBuilder = hook.match(/function buildSystem2UserMessage\(promptClass\) \{[\s\S]*?return sections\.join\('\\n'\);\n\}/);
+  if (oldMsgBuilder) {
+    const newMsgBuilder = `function buildSystem2UserMessage(promptClass) {
   const sections = [
     \`Tool call requiring moral evaluation:\`,
     \`\`,
@@ -271,12 +308,19 @@ const { resolveReferencedFiles } = (() => {
   }
 
   // Referenced file contents for DAG flattening (script execution)
-  const fileContents = resolveReferencedFiles(toolName, toolInput);
-  if (fileContents.length > 0) {
+  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
+
+  // Script detected but not readable → escalate before reaching LLM
+  if (unresolved.length > 0) {
+    escalate(\`Cannot read referenced script(s) for safety analysis: \${unresolved.join(', ')}\`,
+             'n/a', 'n/a', 'unresolved-script', coherence, affective, provenance);
+  }
+
+  if (resolvedFiles.length > 0) {
     sections.push(\`\`, \`## Referenced File Contents\`);
     sections.push(\`The following files are referenced by this tool call. Use their contents for DAG flattening.\`);
-    for (const { filePath, content } of fileContents) {
-      sections.push(\`\`, \`### \${filePath}\`, \\\`\\\`\\\`\\\`\`, content, \\\`\\\`\\\`\\\`\`);
+    for (const { filePath, content } of resolvedFiles) {
+      sections.push(\`\`, \`### \${filePath}\`, \`\\\`\\\`\\\`\`, content, \`\\\`\\\`\\\`\`);
     }
   }
 
@@ -288,7 +332,8 @@ const { resolveReferencedFiles } = (() => {
   return sections.join('\\n');
 }`;
 
-  hook = hook.replace(oldBuilder, newBuilder);
+    hook = hook.replace(oldMsgBuilder[0], newMsgBuilder);
+  }
 
   return hook;
 }
@@ -300,10 +345,10 @@ function install() {
   console.log('');
 
   const files = [
-    { src: null, dst: WRAPPER_DST, content: fs.readFileSync(WRAPPER_SRC, 'utf8'), label: 'Wrapper prompt' },
-    { src: null, dst: path.join(GA_LIB_DIR, 'file-metadata.js'), content: FILE_METADATA_SRC, label: 'File metadata module' },
-    { src: null, dst: path.join(GA_LIB_DIR, 'file-resolver.js'), content: FILE_RESOLVER_SRC, label: 'File resolver module' },
-    { src: null, dst: path.join(HOOKS_DIR, 'guardian-angel.js'), content: buildProductionHook(), label: 'Hook script' },
+    { dst: WRAPPER_DST, content: fs.readFileSync(WRAPPER_SRC, 'utf8'), label: 'Wrapper prompt' },
+    { dst: path.join(GA_LIB_DIR, 'file-metadata.js'), content: buildFileMetadata(), label: 'File metadata module' },
+    { dst: path.join(GA_LIB_DIR, 'file-resolver.js'), content: buildFileResolver(), label: 'File resolver module' },
+    { dst: HOOK_DST, content: buildProductionHook(), label: 'Hook script' },
   ];
 
   for (const file of files) {
@@ -315,7 +360,7 @@ function install() {
       if (current === file.content) {
         console.log(`  ✓ ${file.label}: up to date`);
       } else {
-        console.log(`  ⟳ ${file.label}: differs (${file.dst})`);
+        console.log(`  ⟳ ${file.label}: needs update (${file.dst})`);
       }
       continue;
     }
@@ -330,12 +375,11 @@ function install() {
     console.log(`  ✓ ${action}d: ${file.dst}`);
   }
 
-  // Also update the repo copy
+  // Also update the repo copy (not the template — that's immutable)
   if (!DRY_RUN && !SHOW_DIFF) {
-    const repoHookDst = path.join(REPO_ROOT, 'guardian-angel', 'hooks', 'guardian-angel.js');
     const hookContent = files.find(f => f.label === 'Hook script').content;
-    fs.writeFileSync(repoHookDst, hookContent, 'utf8');
-    console.log(`  ✓ updated: ${repoHookDst}`);
+    fs.writeFileSync(REPO_HOOK, hookContent, 'utf8');
+    console.log(`  ✓ updated: ${REPO_HOOK}`);
   }
 
   console.log('');
