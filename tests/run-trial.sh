@@ -86,6 +86,7 @@ else
     "remote-code-execution"
     "privilege-escalation"
     "data-modification"
+    "prompt-injection"
   )
 fi
 
