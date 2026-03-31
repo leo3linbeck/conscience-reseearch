@@ -60,6 +60,37 @@ const SENSITIVE_FILE_PATTERNS = [
   /\.docker\/config\.json$/i,
 ];
 
+// ── System 1: Tools and commands that always escalate ────────────────
+
+// Tools exempt from evaluation (read-only, no lasting side effects)
+const EXEMPT_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
+]);
+
+// Claude tools that delete files — always escalate for user approval
+const ALWAYS_ESCALATE_TOOLS = new Set(/* populate as needed */ []);
+
+// Bash commands/patterns that delete files — always escalate for user approval
+const DESTRUCTIVE_BASH_PATTERNS = [
+  /\brm\s/,                        // rm (any variant)
+  /\brm\b/,                        // rm at word boundary
+  /\bunlink\s/,                    // unlink
+  /\brmdir\s/,                     // rmdir
+  /\bfind\b.*\s-delete\b/,        // find ... -delete
+  /\bfind\b.*-exec\s+rm\b/,       // find ... -exec rm
+  /\bshred\s/,                     // shred (secure delete)
+  /\btruncate\s/,                  // truncate
+  /\b>\s*\/[^\s]/,                 // > /path (overwrite file with redirect)
+  /\bdd\s+.*of=/,                  // dd (disk write)
+  /\bmkfs\b/,                      // mkfs (format filesystem)
+  /\bgit\s+clean\b/,              // git clean
+  /\bgit\s+reset\s+--hard\b/,     // git reset --hard
+  /\bgit\s+checkout\s+--\s/,      // git checkout -- (discard changes)
+  /\bgit\s+push\s+.*--force\b/,   // git push --force
+  /\bgit\s+push\s+.*-f\b/,        // git push -f
+  /\bgit\s+branch\s+-[dD]\b/,     // git branch -d/-D
+];
+
 /**
  * Load a wrapper prompt from the wrappers/ directory.
  * @param {string} [name='default'] - Wrapper filename (without .txt)
@@ -74,6 +105,48 @@ function loadWrapper(name = 'default') {
 }
 
 /**
+ * System 1: Check if a tool call should be escalated before reaching System 2.
+ * Returns null if no System 1 rule applies (proceed to System 2).
+ *
+ * @param {string} toolName
+ * @param {object} toolInput
+ * @returns {{ blocked: boolean, decision: string, reason: string, raw: null } | null}
+ */
+function checkSystem1(toolName, toolInput) {
+  // Exempt tools — skip all evaluation
+  if (EXEMPT_TOOLS.has(toolName)) {
+    return null; // handled by isExempt() before this is called
+  }
+
+  // Always-escalate tools
+  if (ALWAYS_ESCALATE_TOOLS.has(toolName)) {
+    return {
+      blocked: true,
+      decision: 'ESCALATE',
+      reason: `Tool '${toolName}' requires user approval`,
+      raw: null,
+    };
+  }
+
+  // Destructive bash commands — escalate for user approval
+  if (toolName === 'Bash') {
+    const cmd = toolInput.command || '';
+    for (const pattern of DESTRUCTIVE_BASH_PATTERNS) {
+      if (pattern.test(cmd)) {
+        return {
+          blocked: true,
+          decision: 'ESCALATE',
+          reason: `Destructive command detected (${pattern}): requires user approval`,
+          raw: null,
+        };
+      }
+    }
+  }
+
+  return null; // no System 1 rule — proceed to System 2
+}
+
+/**
  * Extract file paths referenced by a tool call and read their contents.
  * This enables DAG flattening: the LLM can inspect script contents before
  * deciding whether `bash script.sh` is safe.
@@ -81,7 +154,7 @@ function loadWrapper(name = 'default') {
  * Patterns detected:
  *   - Bash: `bash /path/to/script.sh`, `sh script.sh`, `python script.py`,
  *           `node file.js`, `source file`, `. file`
- *   - Write/Edit: file_path from tool input (contents already in input, skip)
+ *   - Bare executable: `/path/to/script.sh` (without bash prefix)
  *
  * @param {string} toolName
  * @param {object} toolInput
@@ -226,6 +299,13 @@ function readFileSafe(filePath) {
 /**
  * Evaluate a tool call using the GA wrapper prompt.
  *
+ * Evaluation pipeline:
+ *   1. System 1: deterministic checks (exempt, always-escalate, destructive commands)
+ *   2. Script resolution: if command references a script file:
+ *      - File readable → include contents for LLM DAG flattening
+ *      - File NOT readable → ESCALATE (can't verify safety)
+ *   3. System 2: LLM evaluation with full context
+ *
  * @param {string} wrapperText - The system prompt (Thomistic framework)
  * @param {string} toolName - Name of the tool (Bash, Write, etc.)
  * @param {object} toolInput - Tool parameters
@@ -245,23 +325,26 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
     return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null };
   }
 
+  // ── System 1: deterministic checks ─────────────────────────────────
+  const s1Result = checkSystem1(toolName, toolInput);
+  if (s1Result) return s1Result;
+
   const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
 
-  // Resolve referenced files so the LLM can flatten the DAG
+  // ── Script resolution ──────────────────────────────────────────────
   const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
 
-  // If the command references script files we couldn't read, skip LLM evaluation.
-  // Without file contents the LLM can't do DAG flattening and will always PAUSE
-  // on uncertainty alone. Let the tool call through — the agent may read the file
-  // and retry with a resolvable command.
-  if (unresolved.length > 0 && resolvedFiles.length === 0) {
+  // Script detected but NOT readable → ESCALATE (can't verify safety)
+  if (unresolved.length > 0) {
     return {
-      blocked: false,
-      decision: 'PROCEED',
-      reason: `skipped — unresolved script reference(s): ${unresolved.join(', ')}`,
+      blocked: true,
+      decision: 'ESCALATE',
+      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
       raw: null,
     };
   }
+
+  // ── Build LLM message ──────────────────────────────────────────────
 
   // Resolve file metadata for Write/Edit (git status, sensitive patterns, staged changes)
   const fileMeta = resolveFileMetadata(toolName, toolInput);
@@ -294,6 +377,8 @@ User's instruction: "${userPrompt}"`;
   }
 
   userMessage += '\nEvaluate and return your JSON decision.';
+
+  // ── System 2: LLM evaluation ───────────────────────────────────────
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
@@ -357,11 +442,6 @@ function parseResponse(apiResult) {
   }
 }
 
-// Tools exempt from evaluation (read-only, no lasting side effects)
-const EXEMPT_TOOLS = new Set([
-  'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
-]);
-
 /**
  * Check if a tool is exempt from GA evaluation.
  */
@@ -369,4 +449,16 @@ function isExempt(toolName) {
   return EXEMPT_TOOLS.has(toolName);
 }
 
-module.exports = { evaluateWithWrapper, loadWrapper, parseResponse, isExempt, EXEMPT_TOOLS };
+module.exports = {
+  evaluateWithWrapper,
+  loadWrapper,
+  parseResponse,
+  isExempt,
+  checkSystem1,
+  resolveReferencedFiles,
+  resolveFileMetadata,
+  EXEMPT_TOOLS,
+  ALWAYS_ESCALATE_TOOLS,
+  DESTRUCTIVE_BASH_PATTERNS,
+  SENSITIVE_FILE_PATTERNS,
+};
