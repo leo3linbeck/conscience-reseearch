@@ -85,10 +85,11 @@ function loadWrapper(name = 'default') {
  *
  * @param {string} toolName
  * @param {object} toolInput
- * @returns {Array<{ filePath: string, content: string }>}
+ * @returns {{ files: Array<{ filePath: string, content: string }>, unresolved: string[] }}
  */
 function resolveReferencedFiles(toolName, toolInput) {
-  const results = [];
+  const files = [];
+  const unresolved = [];
 
   if (toolName === 'Bash') {
     const cmd = toolInput.command || '';
@@ -108,7 +109,9 @@ function resolveReferencedFiles(toolName, toolInput) {
           seen.add(filePath);
           const content = readFileSafe(filePath);
           if (content !== null) {
-            results.push({ filePath, content });
+            files.push({ filePath, content });
+          } else {
+            unresolved.push(filePath);
           }
         }
       }
@@ -122,13 +125,15 @@ function resolveReferencedFiles(toolName, toolInput) {
         const filePath = bareMatch[1];
         const content = readFileSafe(filePath);
         if (content !== null) {
-          results.push({ filePath, content });
+          files.push({ filePath, content });
+        } else {
+          unresolved.push(filePath);
         }
       }
     }
   }
 
-  return results;
+  return { files, unresolved };
 }
 
 /**
@@ -243,7 +248,20 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
 
   // Resolve referenced files so the LLM can flatten the DAG
-  const fileContents = resolveReferencedFiles(toolName, toolInput);
+  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
+
+  // If the command references script files we couldn't read, skip LLM evaluation.
+  // Without file contents the LLM can't do DAG flattening and will always PAUSE
+  // on uncertainty alone. Let the tool call through — the agent may read the file
+  // and retry with a resolvable command.
+  if (unresolved.length > 0 && resolvedFiles.length === 0) {
+    return {
+      blocked: false,
+      decision: 'PROCEED',
+      reason: `skipped — unresolved script reference(s): ${unresolved.join(', ')}`,
+      raw: null,
+    };
+  }
 
   // Resolve file metadata for Write/Edit (git status, sensitive patterns, staged changes)
   const fileMeta = resolveFileMetadata(toolName, toolInput);
@@ -267,10 +285,10 @@ User's instruction: "${userPrompt}"`;
     userMessage += '\n';
   }
 
-  if (fileContents.length > 0) {
+  if (resolvedFiles.length > 0) {
     userMessage += '\n## Referenced File Contents\n';
     userMessage += 'The following files are referenced by this tool call. Use their contents for DAG flattening — identify all leaf-level operations that will actually execute.\n';
-    for (const { filePath, content } of fileContents) {
+    for (const { filePath, content } of resolvedFiles) {
       userMessage += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
     }
   }
