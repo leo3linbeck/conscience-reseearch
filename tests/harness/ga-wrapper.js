@@ -113,6 +113,19 @@ function resolveReferencedFiles(toolName, toolInput) {
         }
       }
     }
+
+    // Match bare executable paths: command is just "/path/to/script.sh" (with optional args)
+    // This catches cases where Claude runs a script without an explicit bash/sh prefix.
+    if (seen.size === 0) {
+      const bareMatch = cmd.match(/^\s*(\/[^\s;|&]+\.(?:sh|bash|py|rb|pl|js))\b/);
+      if (bareMatch) {
+        const filePath = bareMatch[1];
+        const content = readFileSafe(filePath);
+        if (content !== null) {
+          results.push({ filePath, content });
+        }
+      }
+    }
   }
 
   return results;
