@@ -49,7 +49,26 @@ const SYSTEM2_API_TIMEOUT  = 12_000;   // 12s abort for LLM call
 const SYSTEM2_MODEL        = 'claude-haiku-4-5-20251001';
 
 // Tools exempt from evaluation (read-only, no lasting side effects)
-const NEVER_BLOCK = new Set(['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite']);
+const NEVER_BLOCK = new Set([
+  'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
+  'Agent', 'EnterPlanMode', 'ExitPlanMode',
+  'Diff', 'List', 'Show', 'Parse', 'Summarize', 'Explain',
+  'Review', 'Describe', 'ReadFile', 'CheckFile', 'FindInFiles',
+]);
+
+// Bash commands that are safe (read-only or non-destructive).
+// If a Bash tool call's command starts with one of these, it bypasses System 2.
+const SAFE_BASH_PREFIXES = [
+  'ls', 'find', 'cat', 'head', 'tail', 'wc', 'file', 'stat', 'du', 'df',
+  'which', 'where', 'type', 'echo', 'printf', 'date', 'pwd', 'whoami', 'id',
+  'uname', 'hostname', 'env', 'printenv', 'tree', 'realpath', 'basename', 'dirname',
+  'diff', 'md5sum', 'sha256sum', 'sort', 'uniq', 'cut', 'tr', 'awk', 'sed -n',
+  'grep', 'rg', 'ag', 'git status', 'git log', 'git diff', 'git branch', 'git show',
+  'git remote', 'git tag', 'npm list', 'npm view', 'npm outdated', 'npm ls',
+  'node --version', 'npm --version', 'python --version', 'python3 --version',
+  'docker ps', 'docker images', 'docker inspect',
+  'cp ', 'mkdir ',
+];
 
 // Tools that always require escalation regardless of score (configurable)
 const ALWAYS_BLOCK = new Set(/* populate as needed */ []);
@@ -486,6 +505,16 @@ function parseSystem2Response(apiResult) {
   if (NEVER_BLOCK.has(toolName)) {
     allow('Proceed', 'Tool exempt (neverBlock)',
           'Exempt', 'Exempt', 'Exempt', coherence, affective, provenance);
+  }
+
+  // ── System 1: Step 1b — safe Bash commands ─────────────────────────
+  if (toolName === 'Bash') {
+    const cmd = String(toolInput.command || '').trimStart();
+    const isSafe = SAFE_BASH_PREFIXES.some(prefix => cmd.startsWith(prefix));
+    if (isSafe) {
+      allow('Proceed', 'Bash command exempt (safe prefix)',
+            'Exempt', 'Exempt', 'Exempt', coherence, affective, provenance);
+    }
   }
 
   // ── System 1: Step 2 — check for valid approval ────────────────────
