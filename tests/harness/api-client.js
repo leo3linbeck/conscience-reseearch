@@ -3,9 +3,10 @@
 /**
  * Guardian Angel Clinical Trial v3 — API Client
  *
- * Simplified agentic loop with two conditions:
- *   B (ground-truth):  No guardrails — raw behavior
- *   C (treatment):     GA wrapper evaluates each non-exempt tool call
+ * Agentic loop with three conditions:
+ *   A (Claude guardrails): Permission system active, no GA — measures Claude's built-in safety
+ *   B (ground-truth):      No guardrails — raw behavior (establishes ground truth)
+ *   C (GA treatment):      GA wrapper evaluates each non-exempt tool call
  *
  * Usage:
  *   const client = new TrialAPIClient({ condition, wrapperText, userPrompt });
@@ -13,9 +14,10 @@
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
-const { TOOL_DEFINITIONS }            = require('./tool-definitions');
-const { executeTool }                 = require('./tool-executor');
+const { TOOL_DEFINITIONS }              = require('./tool-definitions');
+const { executeTool }                   = require('./tool-executor');
 const { evaluateWithWrapper, isExempt } = require('./ga-wrapper');
+const { simulatePermissionCheck }       = require('./permission-simulator');
 
 const DEFAULT_MODEL     = 'claude-haiku-4-5-20251001';
 const DEFAULT_MAX_TURNS = 10;
@@ -32,7 +34,7 @@ const DEFAULT_SYSTEM_PROMPT =
 class TrialAPIClient {
   /**
    * @param {object} opts
-   * @param {string} opts.condition    - 'B' (ground-truth) or 'C' (treatment)
+   * @param {string} opts.condition    - 'A' (Claude guardrails), 'B' (ground-truth), or 'C' (GA treatment)
    * @param {string} [opts.wrapperText] - GA wrapper prompt text (required for C)
    * @param {string} [opts.userPrompt]  - Original user prompt (for GA context)
    * @param {string} [opts.model]       - Anthropic model ID
@@ -48,7 +50,9 @@ class TrialAPIClient {
     this.maxTurns     = opts.maxTurns || DEFAULT_MAX_TURNS;
     this.apiKey       = process.env.ANTHROPIC_API_KEY;
 
-    this.gaEnabled = this.condition === 'C';
+    this.gaEnabled   = this.condition === 'C';
+    this.permEnabled = this.condition === 'A';
+
     if (this.gaEnabled && !this.wrapperText) {
       throw new Error('Condition C requires wrapperText');
     }
@@ -122,14 +126,16 @@ class TrialAPIClient {
         const toolUseId = block.id;
 
         const attempt = {
-          turn:        this.turnCount,
-          tool:        toolName,
-          input:       toolInput,
-          ga_blocked:  false,
-          ga_decision: null,
-          ga_reason:   null,
-          ga_raw:      null,
-          executed:    false,
+          turn:           this.turnCount,
+          tool:           toolName,
+          input:          toolInput,
+          ga_blocked:     false,
+          ga_decision:    null,
+          ga_reason:      null,
+          ga_raw:         null,
+          perm_blocked:   false,
+          perm_reason:    null,
+          executed:       false,
           result_summary: null,
         };
 
@@ -139,6 +145,19 @@ class TrialAPIClient {
         const inputSummary = toolName === 'Bash'
           ? (toolInput.command || '').slice(0, 60)
           : (toolInput.file_path || toolInput.pattern || '').slice(0, 60);
+
+        // Permission check (condition A only)
+        if (this.permEnabled) {
+          const permResult = simulatePermissionCheck(toolName, toolInput, false);
+          attempt.perm_blocked = !permResult.allowed;
+          attempt.perm_reason  = permResult.reason;
+
+          if (!permResult.allowed) {
+            blocked = true;
+            blockReason = `Permission denied: ${permResult.reason}`;
+            this._progress(`turn ${this.turnCount}: ${toolName}(${inputSummary}) → PERM DENIED`);
+          }
+        }
 
         // GA evaluation (condition C only, non-exempt tools)
         if (this.gaEnabled && !isExempt(toolName)) {

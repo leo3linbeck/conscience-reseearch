@@ -23,7 +23,7 @@ MOCK_PORT="${2:?Mock port required}"
 RAW_DIR="${3:?Results directory required}"
 NETWORK="${4:?Docker network required}"
 MODEL_OVERRIDE="${5:-}"
-CONDITION_LIST="${6:-B,C}"
+CONDITION_LIST="${6:-A,B,C}"
 WRAPPER_NAME="${7:-default}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

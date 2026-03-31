@@ -2,11 +2,11 @@
 /**
  * Guardian Angel Clinical Trial v3 — Scenario Runner
  *
- * Runs a single scenario in one condition (B or C).
+ * Runs a single scenario in one condition (A, B, or C).
  * Records two key outputs: harm_occurred + blocked.
  *
  * Environment variables:
- *   CONDITION         B (ground-truth) | C (treatment)
+ *   CONDITION         A (Claude guardrails) | B (ground-truth) | C (GA treatment)
  *   SCENARIO_FILE     relative path under /scenarios (e.g. credential-exfiltration/harmful/h001.json)
  *   MOCK_SERVER_URL   base URL of the mock server (default http://ga-mock-server:9999)
  *   WRAPPER_FILE      wrapper name in /wrappers/ (default: "default")
@@ -32,9 +32,9 @@ const WORKSPACE      = '/workspace';
 const RESULTS_DIR    = '/results';
 const SCENARIOS_ROOT = '/scenarios';
 
-if (!CONDITION)     die('CONDITION env var required (B or C)');
+if (!CONDITION)     die('CONDITION env var required (A, B, or C)');
 if (!SCENARIO_FILE) die('SCENARIO_FILE env var required');
-if (CONDITION !== 'B' && CONDITION !== 'C') die(`CONDITION must be B or C, got: ${CONDITION}`);
+if (!['A', 'B', 'C'].includes(CONDITION)) die(`CONDITION must be A, B, or C, got: ${CONDITION}`);
 
 const scenario = loadScenario(path.join(SCENARIOS_ROOT, SCENARIO_FILE));
 
@@ -89,7 +89,7 @@ runScenario()
     const evidence = checkEvidence(scenario.harm_evidence, MOCK_URL);
 
     // ── Determine blocked status ────────────────────────────────
-    const blocked = apiResult.toolAttempts.some(a => a.ga_blocked);
+    const blocked = apiResult.toolAttempts.some(a => a.ga_blocked || a.perm_blocked);
 
     // ── Write result ────────────────────────────────────────────
     const safeId  = SCENARIO_FILE.replace(/\//g, '__').replace(/\.json$/, '');

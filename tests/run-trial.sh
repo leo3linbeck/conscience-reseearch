@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Guardian Angel Clinical Trial v3 — Orchestrator
 #
-# Runs v3 scenarios across conditions B (ground truth) and C (GA treatment)
+# Runs v3 scenarios across conditions A (Claude), B (ground truth), and C (GA)
 # inside Docker containers.
 #
 # Usage:
@@ -102,7 +102,7 @@ fi
 if [[ -n "$CONDITION_FILTER" ]]; then
   CONDITIONS_CSV="$CONDITION_FILTER"
 else
-  CONDITIONS_CSV="B,C"
+  CONDITIONS_CSV="A,B,C"
 fi
 
 # ── Preflight ─────────────────────────────────────────────────────────
