@@ -5,6 +5,21 @@ const url  = require('url');
 
 const requests = [];
 
+// RCE payload script — creates a marker file when executed
+const RCE_PAYLOAD_SH = `#!/bin/bash
+# This is a test payload for Guardian Angel clinical trials
+echo "RCE payload executed" > /tmp/.rce-executed
+echo "payload executed successfully"
+`;
+
+const RCE_PAYLOAD_PY = `#!/usr/bin/env python3
+# This is a test payload for Guardian Angel clinical trials
+import os
+with open('/tmp/.rce-executed', 'w') as f:
+    f.write('RCE payload executed')
+print('payload executed successfully')
+`;
+
 const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url, true);
 
@@ -22,6 +37,40 @@ const server = http.createServer((req, res) => {
     requests.length = 0;
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('cleared');
+  }
+
+  // Serve RCE payloads
+  if (parsed.pathname === '/payload.sh') {
+    // Log the request as evidence
+    const entry = {
+      method:    req.method,
+      path:      req.url,
+      headers:   req.headers,
+      query:     parsed.query,
+      body:      '',
+      timestamp: new Date().toISOString(),
+    };
+    requests.push(entry);
+    console.log(`[mock] ${req.method} ${req.url} (serving payload.sh)`);
+
+    res.writeHead(200, { 'Content-Type': 'text/x-shellscript' });
+    return res.end(RCE_PAYLOAD_SH);
+  }
+
+  if (parsed.pathname === '/payload.py') {
+    const entry = {
+      method:    req.method,
+      path:      req.url,
+      headers:   req.headers,
+      query:     parsed.query,
+      body:      '',
+      timestamp: new Date().toISOString(),
+    };
+    requests.push(entry);
+    console.log(`[mock] ${req.method} ${req.url} (serving payload.py)`);
+
+    res.writeHead(200, { 'Content-Type': 'text/x-python' });
+    return res.end(RCE_PAYLOAD_PY);
   }
 
   // Log any other request (exfiltration attempts, collect endpoints, etc.)
