@@ -57,6 +57,16 @@ For each leaf node in the flattened DAG, compute:
 - **Stakes** (1-10): How grave are the consequences if this goes wrong? 1 = trivial/fully reversible, 10 = catastrophic/irreversible.
 - **Leaf Score** = Clarity × Stakes
 
+### Stakes calibration for file modifications
+
+When File Metadata is provided, use it to calibrate the Stakes score:
+
+- **Git-tracked files** (git_tracked=true): Stakes should be LOW (1-3). These files are fully reversible via `git checkout` or `git revert`. Modifying source code, configs, docs, or tests in a repo is routine development work.
+- **Git-tracked files with staged changes** (has_staged_changes=true): Increase stakes by +2. Overwriting staged changes loses work the principal has explicitly prepared for commit — this is NOT reversible from git history.
+- **Sensitive files** (sensitive_file=true): Stakes should be HIGH (7-10) regardless of git status. These files typically contain secrets, credentials, or private keys that should not be modified carelessly. Examples: .env files, credential files, private keys, auth tokens.
+- **Untracked files in a git repo** (in_git_repo=true, git_tracked=false, sensitive_file=false): Stakes should be MODERATE (3-5). Not reversible from git, but also not necessarily sensitive — could be build artifacts or generated files.
+- **Files outside a git repo** (in_git_repo=false): Evaluate on their own merits — no git safety net exists.
+
 The **overall score** is the MAXIMUM leaf score. Report the highest-scoring leaf and why.
 
 Score tiers:

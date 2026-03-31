@@ -17,10 +17,48 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const DEFAULT_MODEL   = 'claude-haiku-4-5-20251001';
 const API_TIMEOUT     = 12_000;
+const MAX_FILE_SIZE   = 10_000; // max chars to include per referenced file
 const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
+
+// ── Sensitive file patterns ──────────────────────────────────────────
+// Files matching these patterns are NOT safely reversible via git
+// (typically gitignored) and warrant higher stakes scoring.
+// Extend this array to add new categories.
+const SENSITIVE_FILE_PATTERNS = [
+  // Environment / secrets
+  /\.env$/i,
+  /\.env\.[a-z]+$/i,           // .env.local, .env.production, etc.
+
+  // Credentials & keys
+  /credentials$/i,
+  /\.pem$/i,
+  /\.key$/i,
+  /\.p12$/i,
+  /\.pfx$/i,
+  /\.jks$/i,
+  /\.keystore$/i,
+  /id_rsa/i,
+  /id_ed25519/i,
+  /id_ecdsa/i,
+
+  // Secret configs
+  /secrets?\.(ya?ml|json|toml)$/i,
+  /\.secret$/i,
+  /\.htpasswd$/i,
+  /\.netrc$/i,
+  /\.pgpass$/i,
+
+  // Token / auth files
+  /token(s)?\.(json|ya?ml|txt)$/i,
+  /auth\.(json|ya?ml)$/i,
+  /\.npmrc$/i,
+  /\.pypirc$/i,
+  /\.docker\/config\.json$/i,
+];
 
 /**
  * Load a wrapper prompt from the wrappers/ directory.
@@ -33,6 +71,138 @@ function loadWrapper(name = 'default') {
     throw new Error(`Wrapper not found: ${filePath}`);
   }
   return fs.readFileSync(filePath, 'utf8');
+}
+
+/**
+ * Extract file paths referenced by a tool call and read their contents.
+ * This enables DAG flattening: the LLM can inspect script contents before
+ * deciding whether `bash script.sh` is safe.
+ *
+ * Patterns detected:
+ *   - Bash: `bash /path/to/script.sh`, `sh script.sh`, `python script.py`,
+ *           `node file.js`, `source file`, `. file`
+ *   - Write/Edit: file_path from tool input (contents already in input, skip)
+ *
+ * @param {string} toolName
+ * @param {object} toolInput
+ * @returns {Array<{ filePath: string, content: string }>}
+ */
+function resolveReferencedFiles(toolName, toolInput) {
+  const results = [];
+
+  if (toolName === 'Bash') {
+    const cmd = toolInput.command || '';
+
+    // Match: bash/sh/source/. <filepath>, python/python3/node/ruby/perl <filepath>
+    const patterns = [
+      /(?:^|\s|&&|\|\||;)\s*(?:bash|sh|zsh|source|\.)\s+(\/[^\s;|&]+)/g,
+      /(?:^|\s|&&|\|\||;)\s*(?:python3?|node|ruby|perl)\s+(\/[^\s;|&]+)/g,
+    ];
+
+    const seen = new Set();
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(cmd)) !== null) {
+        const filePath = match[1];
+        if (!seen.has(filePath)) {
+          seen.add(filePath);
+          const content = readFileSafe(filePath);
+          if (content !== null) {
+            results.push({ filePath, content });
+          }
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Resolve file metadata for Write/Edit tool calls.
+ * Provides git tracking status, sensitive file detection, and staged changes
+ * so the LLM can make informed stakes assessments.
+ *
+ * @param {string} toolName
+ * @param {object} toolInput
+ * @returns {object|null} File metadata or null if not a file-modifying tool
+ */
+function resolveFileMetadata(toolName, toolInput) {
+  const filePath = toolInput.file_path;
+  if (!filePath) return null;
+
+  // Only resolve for file-modifying tools
+  if (toolName !== 'Write' && toolName !== 'Edit') return null;
+
+  const meta = {
+    path: filePath,
+    in_git_repo: false,
+    git_tracked: false,
+    has_staged_changes: false,
+    is_sensitive: false,
+    sensitive_reason: null,
+  };
+
+  // Check sensitive patterns
+  const basename = path.basename(filePath);
+  for (const pattern of SENSITIVE_FILE_PATTERNS) {
+    if (pattern.test(basename) || pattern.test(filePath)) {
+      meta.is_sensitive = true;
+      meta.sensitive_reason = `matches sensitive pattern: ${pattern}`;
+      break;
+    }
+  }
+
+  // Check git status
+  const dir = path.dirname(filePath);
+  try {
+    const repoRoot = execSync('git rev-parse --show-toplevel', {
+      cwd: dir, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    meta.in_git_repo = true;
+
+    // Is file tracked by git?
+    try {
+      execSync(`git ls-files --error-unmatch ${JSON.stringify(filePath)}`, {
+        cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      meta.git_tracked = true;
+    } catch {
+      meta.git_tracked = false;
+    }
+
+    // Does file have staged changes?
+    try {
+      const staged = execSync(`git diff --cached --name-only -- ${JSON.stringify(filePath)}`, {
+        cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      meta.has_staged_changes = staged.length > 0;
+    } catch {
+      meta.has_staged_changes = false;
+    }
+  } catch {
+    // Not in a git repo
+    meta.in_git_repo = false;
+  }
+
+  return meta;
+}
+
+/**
+ * Safely read a file, returning null if it doesn't exist or is too large.
+ */
+function readFileSafe(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size > MAX_FILE_SIZE) {
+      return `[file too large: ${stat.size} bytes, truncated]\n` +
+        fs.readFileSync(filePath, 'utf8').slice(0, MAX_FILE_SIZE);
+    }
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -59,13 +229,40 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
 
   const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
 
-  const userMessage = `Tool call requiring evaluation:
+  // Resolve referenced files so the LLM can flatten the DAG
+  const fileContents = resolveReferencedFiles(toolName, toolInput);
+
+  // Resolve file metadata for Write/Edit (git status, sensitive patterns, staged changes)
+  const fileMeta = resolveFileMetadata(toolName, toolInput);
+
+  let userMessage = `Tool call requiring evaluation:
 
 Tool: ${toolName}
 Input: ${JSON.stringify(toolInput, null, 2)}
-User's instruction: "${userPrompt}"
+User's instruction: "${userPrompt}"`;
 
-Evaluate and return your JSON decision.`;
+  if (fileMeta) {
+    userMessage += '\n\n## File Metadata\n';
+    userMessage += `Path: ${fileMeta.path}\n`;
+    userMessage += `In git repo: ${fileMeta.in_git_repo}\n`;
+    userMessage += `Git tracked: ${fileMeta.git_tracked}\n`;
+    userMessage += `Has staged changes: ${fileMeta.has_staged_changes}\n`;
+    userMessage += `Sensitive file: ${fileMeta.is_sensitive}`;
+    if (fileMeta.sensitive_reason) {
+      userMessage += ` (${fileMeta.sensitive_reason})`;
+    }
+    userMessage += '\n';
+  }
+
+  if (fileContents.length > 0) {
+    userMessage += '\n## Referenced File Contents\n';
+    userMessage += 'The following files are referenced by this tool call. Use their contents for DAG flattening — identify all leaf-level operations that will actually execute.\n';
+    for (const { filePath, content } of fileContents) {
+      userMessage += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
+    }
+  }
+
+  userMessage += '\nEvaluate and return your JSON decision.';
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
