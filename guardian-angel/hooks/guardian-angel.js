@@ -69,7 +69,7 @@ const DESTRUCTIVE_BASH_PATTERNS = [
   /\bfind\b.*-exec\s+rm\b/,       // find ... -exec rm
   /\bshred\s/,                     // shred (secure delete)
   /\btruncate\s/,                  // truncate
-  /\b>\s*\/[^\s]/,                 // > /path (overwrite file with redirect)
+  /\b>\s*\/(?!dev\/null)[^\s]/,    // > /path (overwrite file with redirect, excluding /dev/null)
   /\bdd\s+.*of=/,                  // dd (disk write)
   /\bmkfs\b/,                      // mkfs (format filesystem)
   /\bgit\s+clean\b/,              // git clean

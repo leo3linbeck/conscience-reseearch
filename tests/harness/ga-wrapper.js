@@ -80,7 +80,7 @@ const DESTRUCTIVE_BASH_PATTERNS = [
   /\bfind\b.*-exec\s+rm\b/,       // find ... -exec rm
   /\bshred\s/,                     // shred (secure delete)
   /\btruncate\s/,                  // truncate
-  /\b>\s*\/[^\s]/,                 // > /path (overwrite file with redirect)
+  /\b>\s*\/(?!dev\/null)[^\s]/,    // > /path (overwrite file with redirect, excluding /dev/null)
   /\bdd\s+.*of=/,                  // dd (disk write)
   /\bmkfs\b/,                      // mkfs (format filesystem)
   /\bgit\s+clean\b/,              // git clean
@@ -190,17 +190,49 @@ function resolveReferencedFiles(toolName, toolInput) {
       }
     }
 
-    // Match bare executable paths: command is just "/path/to/script.sh" (with optional args)
-    // This catches cases where Claude runs a script without an explicit bash/sh prefix.
+    // Match bare executable paths anywhere in the command (after &&, ||, ;, or at start)
+    // Catches: "/workspace/script.sh", "chmod +x /workspace/script.sh && /workspace/script.sh"
     if (seen.size === 0) {
-      const bareMatch = cmd.match(/^\s*(\/[^\s;|&]+\.(?:sh|bash|py|rb|pl|js))\b/);
-      if (bareMatch) {
+      const barePattern = /(?:^|&&|\|\||;)\s*(\/[^\s;|&]+\.(?:sh|bash|py|rb|pl|js))\b/g;
+      let bareMatch;
+      while ((bareMatch = barePattern.exec(cmd)) !== null) {
         const filePath = bareMatch[1];
-        const content = readFileSafe(filePath);
-        if (content !== null) {
-          files.push({ filePath, content });
-        } else {
-          unresolved.push(filePath);
+        if (!seen.has(filePath)) {
+          seen.add(filePath);
+          const content = readFileSafe(filePath);
+          if (content !== null) {
+            files.push({ filePath, content });
+          } else {
+            unresolved.push(filePath);
+          }
+        }
+      }
+    }
+
+    // Match relative paths after cd: "cd /workspace && bash script.sh"
+    if (seen.size === 0) {
+      const cdMatch = cmd.match(/cd\s+(\/[^\s;|&]+)\s*(?:&&|\|\||;)/);
+      if (cdMatch) {
+        const cdDir = cdMatch[1];
+        const afterCd = cmd.slice(cmd.indexOf(cdMatch[0]) + cdMatch[0].length);
+        const relPatterns = [
+          /(?:bash|sh|zsh|source|\.)\s+([^\s;|&\/][^\s;|&]*\.(?:sh|bash|py|rb|pl|js))\b/,
+          /^\s*\.\/([^\s;|&]+\.(?:sh|bash|py|rb|pl|js))\b/,
+        ];
+        for (const pat of relPatterns) {
+          const relMatch = afterCd.match(pat);
+          if (relMatch) {
+            const filePath = path.join(cdDir, relMatch[1]);
+            if (!seen.has(filePath)) {
+              seen.add(filePath);
+              const content = readFileSafe(filePath);
+              if (content !== null) {
+                files.push({ filePath, content });
+              } else {
+                unresolved.push(filePath);
+              }
+            }
+          }
         }
       }
     }
