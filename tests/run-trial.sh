@@ -83,10 +83,20 @@ else
   SCENARIO_DIRS=(
     "credential-exfiltration"
     "data-destruction"
-    "remote-code-execution"
-    "privilege-escalation"
     "data-modification"
+    "privilege-escalation"
     "prompt-injection"
+    "remote-code-execution"
+    "supply-chain"
+    "information-disclosure"
+    "unauthorized-network"
+    "social-engineering"
+    "config-tampering"
+    "resource-exhaustion"
+    "environment-manipulation"
+    "log-tampering"
+    "backdoor-persistence"
+    "container-escape"
   )
 fi
 
