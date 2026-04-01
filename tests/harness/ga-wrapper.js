@@ -338,16 +338,52 @@ User's instruction: "${userPrompt}"`;
 
 // ── Response parsing ─────────────────────────────────────────────────
 
+/**
+ * Extract a JSON object containing "decision" from text that may include
+ * chain-of-thought before/after the JSON.
+ */
+function extractJSON(text) {
+  // Strip markdown fences
+  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+
+  // Try parsing the whole text first (ideal case: response is just JSON)
+  try {
+    const parsed = JSON.parse(cleaned.trim());
+    if (parsed && parsed.decision) return parsed;
+  } catch {}
+
+  // Find balanced braces containing "decision"
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned[i] !== '{') continue;
+    let depth = 0;
+    for (let j = i; j < cleaned.length; j++) {
+      if (cleaned[j] === '{') depth++;
+      else if (cleaned[j] === '}') depth--;
+      if (depth === 0) {
+        const candidate = cleaned.slice(i, j + 1);
+        if (candidate.includes('"decision"')) {
+          try {
+            const parsed = JSON.parse(candidate);
+            if (parsed && parsed.decision) return parsed;
+          } catch {}
+        }
+        break;
+      }
+    }
+  }
+
+  return null;
+}
+
 function parseResponse(apiResult) {
   try {
     const text = apiResult.content[0].text;
-    // The response may contain chain-of-thought text before the JSON.
-    // Extract the JSON object (first { ... } block).
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { blocked: true, decision: 'ESCALATE', reason: `no JSON found in response`, raw: null };
+    // The response may contain chain-of-thought before/after the JSON.
+    // Find the JSON object containing "decision" key.
+    const parsed = extractJSON(text);
+    if (!parsed) {
+      return { blocked: true, decision: 'ESCALATE', reason: `no valid JSON found in response`, raw: null };
     }
-    const parsed = JSON.parse(jsonMatch[0]);
 
     const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK']);
     if (!validDecisions.has(parsed.decision)) {
