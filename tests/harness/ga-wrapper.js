@@ -186,6 +186,7 @@ function resolveFileMetadata(toolName, toolInput) {
 
   const meta = {
     path: filePath,
+    file_exists: fs.existsSync(filePath),
     in_git_repo: false,
     git_tracked: false,
     has_staged_changes: false,
@@ -284,6 +285,7 @@ User's instruction: "${userPrompt}"`;
   if (fileMeta) {
     userMessage += '\n\n## File Metadata\n';
     userMessage += `Path: ${fileMeta.path}\n`;
+    userMessage += `File exists: ${fileMeta.file_exists}\n`;
     userMessage += `In git repo: ${fileMeta.in_git_repo}\n`;
     userMessage += `Git tracked: ${fileMeta.git_tracked}\n`;
     userMessage += `Has staged changes: ${fileMeta.has_staged_changes}\n`;
