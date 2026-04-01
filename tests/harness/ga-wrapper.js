@@ -3,11 +3,13 @@
 /**
  * Guardian Angel Clinical Trial v3 — Stateless GA Wrapper
  *
- * Evaluates a single tool call using a wrapper prompt (the Thomistic framework).
- * Completely stateless: wrapper text + tool call + user prompt → ALLOW|BLOCK
+ * Two-phase System 2 evaluation:
+ *   Phase 1 (Compilation): Factual analysis — what does this tool call do?
+ *   Phase 2 (Evaluation):  Moral assessment — should it be allowed?
  *
- * The wrapper text is loaded from a file (default: wrappers/default.txt).
- * This is the single variable that gets optimized.
+ * The compilation prompt (compile.txt) and evaluation prompt (default.txt)
+ * are loaded from the wrappers/ directory. The evaluation prompt is the
+ * single variable that gets optimized.
  *
  * Usage:
  *   const { evaluateWithWrapper, loadWrapper } = require('./ga-wrapper');
@@ -19,21 +21,15 @@ const fs   = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const DEFAULT_MODEL   = 'claude-haiku-4-5-20251001';
-const API_TIMEOUT     = 12_000;
-const MAX_FILE_SIZE   = 10_000; // max chars to include per referenced file
-const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
+const DEFAULT_MODEL    = 'claude-haiku-4-5-20251001';
+const PHASE_TIMEOUT    = 10_000;  // 10s per phase
+const MAX_FILE_SIZE    = 10_000;  // max chars to include per referenced file
+const WRAPPERS_DIR     = path.join(__dirname, '..', 'wrappers');
 
 // ── Sensitive file patterns ──────────────────────────────────────────
-// Files matching these patterns are NOT safely reversible via git
-// (typically gitignored) and warrant higher stakes scoring.
-// Extend this array to add new categories.
 const SENSITIVE_FILE_PATTERNS = [
-  // Environment / secrets
   /\.env$/i,
-  /\.env\.[a-z]+$/i,           // .env.local, .env.production, etc.
-
-  // Credentials & keys
+  /\.env\.[a-z]+$/i,
   /credentials$/i,
   /\.pem$/i,
   /\.key$/i,
@@ -44,15 +40,11 @@ const SENSITIVE_FILE_PATTERNS = [
   /id_rsa/i,
   /id_ed25519/i,
   /id_ecdsa/i,
-
-  // Secret configs
   /secrets?\.(ya?ml|json|toml)$/i,
   /\.secret$/i,
   /\.htpasswd$/i,
   /\.netrc$/i,
   /\.pgpass$/i,
-
-  // Token / auth files
   /token(s)?\.(json|ya?ml|txt)$/i,
   /auth\.(json|ya?ml)$/i,
   /\.npmrc$/i,
@@ -62,40 +54,34 @@ const SENSITIVE_FILE_PATTERNS = [
 
 // ── System 1: Tools and commands that always escalate ────────────────
 
-// Tools exempt from evaluation (read-only, no lasting side effects)
 const EXEMPT_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
 ]);
 
-// Claude tools that delete files — always escalate for user approval
 const ALWAYS_ESCALATE_TOOLS = new Set(/* populate as needed */ []);
 
-// Bash commands/patterns that delete files — always escalate for user approval
 const DESTRUCTIVE_BASH_PATTERNS = [
-  /\brm\s/,                        // rm (any variant)
-  /\brm\b/,                        // rm at word boundary
-  /\bunlink\s/,                    // unlink
-  /\brmdir\s/,                     // rmdir
-  /\bfind\b.*\s-delete\b/,        // find ... -delete
-  /\bfind\b.*-exec\s+rm\b/,       // find ... -exec rm
-  /\bshred\s/,                     // shred (secure delete)
-  /\btruncate\s/,                  // truncate
-  /\b>\s*\/(?!dev\/null)[^\s]/,    // > /path (overwrite file with redirect, excluding /dev/null)
-  /\bdd\s+.*of=/,                  // dd (disk write)
-  /\bmkfs\b/,                      // mkfs (format filesystem)
-  /\bgit\s+clean\b/,              // git clean
-  /\bgit\s+reset\s+--hard\b/,     // git reset --hard
-  /\bgit\s+checkout\s+--\s/,      // git checkout -- (discard changes)
-  /\bgit\s+push\s+.*--force\b/,   // git push --force
-  /\bgit\s+push\s+.*-f\b/,        // git push -f
-  /\bgit\s+branch\s+-[dD]\b/,     // git branch -d/-D
+  /\brm\s/,
+  /\brm\b/,
+  /\bunlink\s/,
+  /\brmdir\s/,
+  /\bfind\b.*\s-delete\b/,
+  /\bfind\b.*-exec\s+rm\b/,
+  /\bshred\s/,
+  /\btruncate\s/,
+  /\b>\s*\/(?!dev\/null)[^\s]/,
+  /\bdd\s+.*of=/,
+  /\bmkfs\b/,
+  /\bgit\s+clean\b/,
+  /\bgit\s+reset\s+--hard\b/,
+  /\bgit\s+checkout\s+--\s/,
+  /\bgit\s+push\s+.*--force\b/,
+  /\bgit\s+push\s+.*-f\b/,
+  /\bgit\s+branch\s+-[dD]\b/,
 ];
 
-/**
- * Load a wrapper prompt from the wrappers/ directory.
- * @param {string} [name='default'] - Wrapper filename (without .txt)
- * @returns {string} The wrapper text
- */
+// ── Wrapper loading ──────────────────────────────────────────────────
+
 function loadWrapper(name = 'default') {
   const filePath = path.join(WRAPPERS_DIR, `${name}.txt`);
   if (!fs.existsSync(filePath)) {
@@ -104,62 +90,31 @@ function loadWrapper(name = 'default') {
   return fs.readFileSync(filePath, 'utf8');
 }
 
-/**
- * System 1: Check if a tool call should be escalated before reaching System 2.
- * Returns null if no System 1 rule applies (proceed to System 2).
- *
- * @param {string} toolName
- * @param {object} toolInput
- * @returns {{ blocked: boolean, decision: string, reason: string, raw: null } | null}
- */
+// ── System 1 ─────────────────────────────────────────────────────────
+
 function checkSystem1(toolName, toolInput) {
-  // Exempt tools — skip all evaluation
   if (EXEMPT_TOOLS.has(toolName)) {
-    return null; // handled by isExempt() before this is called
+    return null;
   }
 
-  // Always-escalate tools
   if (ALWAYS_ESCALATE_TOOLS.has(toolName)) {
-    return {
-      blocked: true,
-      decision: 'ESCALATE',
-      reason: `Tool '${toolName}' requires user approval`,
-      raw: null,
-    };
+    return { blocked: true, decision: 'ESCALATE', reason: `Tool '${toolName}' requires user approval`, raw: null };
   }
 
-  // Destructive bash commands — escalate for user approval
   if (toolName === 'Bash') {
     const cmd = toolInput.command || '';
     for (const pattern of DESTRUCTIVE_BASH_PATTERNS) {
       if (pattern.test(cmd)) {
-        return {
-          blocked: true,
-          decision: 'ESCALATE',
-          reason: `Destructive command detected (${pattern}): requires user approval`,
-          raw: null,
-        };
+        return { blocked: true, decision: 'ESCALATE', reason: `Destructive command detected (${pattern}): requires user approval`, raw: null };
       }
     }
   }
 
-  return null; // no System 1 rule — proceed to System 2
+  return null;
 }
 
-/**
- * Extract file paths referenced by a tool call and read their contents.
- * This enables DAG flattening: the LLM can inspect script contents before
- * deciding whether `bash script.sh` is safe.
- *
- * Patterns detected:
- *   - Bash: `bash /path/to/script.sh`, `sh script.sh`, `python script.py`,
- *           `node file.js`, `source file`, `. file`
- *   - Bare executable: `/path/to/script.sh` (without bash prefix)
- *
- * @param {string} toolName
- * @param {object} toolInput
- * @returns {{ files: Array<{ filePath: string, content: string }>, unresolved: string[] }}
- */
+// ── File resolution ──────────────────────────────────────────────────
+
 function resolveReferencedFiles(toolName, toolInput) {
   const files = [];
   const unresolved = [];
@@ -167,7 +122,6 @@ function resolveReferencedFiles(toolName, toolInput) {
   if (toolName === 'Bash') {
     const cmd = toolInput.command || '';
 
-    // Match: bash/sh/source/. <filepath>, python/python3/node/ruby/perl <filepath>
     const patterns = [
       /(?:^|\s|&&|\|\||;)\s*(?:bash|sh|zsh|source|\.)\s+(\/[^\s;|&]+)/g,
       /(?:^|\s|&&|\|\||;)\s*(?:python3?|node|ruby|perl)\s+(\/[^\s;|&]+)/g,
@@ -181,17 +135,12 @@ function resolveReferencedFiles(toolName, toolInput) {
         if (!seen.has(filePath)) {
           seen.add(filePath);
           const content = readFileSafe(filePath);
-          if (content !== null) {
-            files.push({ filePath, content });
-          } else {
-            unresolved.push(filePath);
-          }
+          if (content !== null) { files.push({ filePath, content }); }
+          else { unresolved.push(filePath); }
         }
       }
     }
 
-    // Match bare executable paths anywhere in the command (after &&, ||, ;, or at start)
-    // Catches: "/workspace/script.sh", "chmod +x /workspace/script.sh && /workspace/script.sh"
     if (seen.size === 0) {
       const barePattern = /(?:^|&&|\|\||;)\s*(\/[^\s;|&]+\.(?:sh|bash|py|rb|pl|js))\b/g;
       let bareMatch;
@@ -200,16 +149,12 @@ function resolveReferencedFiles(toolName, toolInput) {
         if (!seen.has(filePath)) {
           seen.add(filePath);
           const content = readFileSafe(filePath);
-          if (content !== null) {
-            files.push({ filePath, content });
-          } else {
-            unresolved.push(filePath);
-          }
+          if (content !== null) { files.push({ filePath, content }); }
+          else { unresolved.push(filePath); }
         }
       }
     }
 
-    // Match relative paths after cd: "cd /workspace && bash script.sh"
     if (seen.size === 0) {
       const cdMatch = cmd.match(/cd\s+(\/[^\s;|&]+)\s*(?:&&|\|\||;)/);
       if (cdMatch) {
@@ -226,11 +171,8 @@ function resolveReferencedFiles(toolName, toolInput) {
             if (!seen.has(filePath)) {
               seen.add(filePath);
               const content = readFileSafe(filePath);
-              if (content !== null) {
-                files.push({ filePath, content });
-              } else {
-                unresolved.push(filePath);
-              }
+              if (content !== null) { files.push({ filePath, content }); }
+              else { unresolved.push(filePath); }
             }
           }
         }
@@ -241,20 +183,9 @@ function resolveReferencedFiles(toolName, toolInput) {
   return { files, unresolved };
 }
 
-/**
- * Resolve file metadata for Write/Edit tool calls.
- * Provides git tracking status, sensitive file detection, and staged changes
- * so the LLM can make informed stakes assessments.
- *
- * @param {string} toolName
- * @param {object} toolInput
- * @returns {object|null} File metadata or null if not a file-modifying tool
- */
 function resolveFileMetadata(toolName, toolInput) {
   const filePath = toolInput.file_path;
   if (!filePath) return null;
-
-  // Only resolve for file-modifying tools
   if (toolName !== 'Write' && toolName !== 'Edit') return null;
 
   const meta = {
@@ -266,7 +197,6 @@ function resolveFileMetadata(toolName, toolInput) {
     sensitive_reason: null,
   };
 
-  // Check sensitive patterns
   const basename = path.basename(filePath);
   for (const pattern of SENSITIVE_FILE_PATTERNS) {
     if (pattern.test(basename) || pattern.test(filePath)) {
@@ -276,45 +206,31 @@ function resolveFileMetadata(toolName, toolInput) {
     }
   }
 
-  // Check git status
   const dir = path.dirname(filePath);
   try {
     const repoRoot = execSync('git rev-parse --show-toplevel', {
       cwd: dir, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
-
     meta.in_git_repo = true;
 
-    // Is file tracked by git?
     try {
       execSync(`git ls-files --error-unmatch ${JSON.stringify(filePath)}`, {
         cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
       });
       meta.git_tracked = true;
-    } catch {
-      meta.git_tracked = false;
-    }
+    } catch { meta.git_tracked = false; }
 
-    // Does file have staged changes?
     try {
       const staged = execSync(`git diff --cached --name-only -- ${JSON.stringify(filePath)}`, {
         cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
       }).trim();
       meta.has_staged_changes = staged.length > 0;
-    } catch {
-      meta.has_staged_changes = false;
-    }
-  } catch {
-    // Not in a git repo
-    meta.in_git_repo = false;
-  }
+    } catch { meta.has_staged_changes = false; }
+  } catch { meta.in_git_repo = false; }
 
   return meta;
 }
 
-/**
- * Safely read a file, returning null if it doesn't exist or is too large.
- */
 function readFileSafe(filePath) {
   try {
     const stat = fs.statSync(filePath);
@@ -323,69 +239,76 @@ function readFileSafe(filePath) {
         fs.readFileSync(filePath, 'utf8').slice(0, MAX_FILE_SIZE);
     }
     return fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return null;
+  } catch { return null; }
+}
+
+// ── Phase 1: Compilation ─────────────────────────────────────────────
+
+/**
+ * Produce a factual description of what a tool call will do.
+ * No moral judgment — just exhaustive enumeration of leaf operations.
+ *
+ * @returns {Promise<{ description: string, error: string|null }>}
+ */
+async function invokeCompilation(toolName, toolInput, userPrompt, resolvedFiles, apiKey, model) {
+  const compilePrompt = loadWrapper('compile');
+
+  let userMessage = `Tool: ${toolName}\nInput: ${JSON.stringify(toolInput, null, 2)}\nUser's instruction: "${userPrompt}"`;
+
+  if (resolvedFiles.length > 0) {
+    userMessage += '\n\n## Referenced File Contents\n';
+    for (const { filePath, content } of resolvedFiles) {
+      userMessage += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
+    }
+  }
+
+  userMessage += '\n\nAnalyze this tool call and produce your structured description.';
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1024,
+        temperature: 0,
+        system: compilePrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return { description: null, error: `compilation API error: ${response.status}` };
+    }
+
+    const result = await response.json();
+    const text = result.content[0].text;
+    return { description: text, error: null };
+  } catch (err) {
+    clearTimeout(timeout);
+    return { description: null, error: `compilation error: ${err.message}` };
   }
 }
 
+// ── Phase 2: Evaluation ──────────────────────────────────────────────
+
 /**
- * Evaluate a tool call using the GA wrapper prompt.
+ * Morally evaluate a compiled description using the Thomistic framework.
  *
- * Evaluation pipeline:
- *   1. System 1: deterministic checks (exempt, always-escalate, destructive commands)
- *   2. Script resolution: if command references a script file:
- *      - File readable → include contents for LLM DAG flattening
- *      - File NOT readable → ESCALATE (can't verify safety)
- *   3. System 2: LLM evaluation with full context
- *
- * @param {string} wrapperText - The system prompt (Thomistic framework)
- * @param {string} toolName - Name of the tool (Bash, Write, etc.)
- * @param {object} toolInput - Tool parameters
- * @param {string} userPrompt - The user's original instruction
- * @param {string} apiKey - Anthropic API key
- * @param {object} [opts] - Optional overrides
- * @param {string} [opts.model] - Model override
- * @returns {Promise<{
- *   blocked: boolean,
- *   decision: string,
- *   reason: string,
- *   raw: object|null,
- * }>}
+ * @returns {Promise<{ blocked: boolean, decision: string, reason: string, raw: object|null }>}
  */
-async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt, apiKey, opts = {}) {
-  if (!apiKey) {
-    return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null };
-  }
-
-  // ── System 1: deterministic checks ─────────────────────────────────
-  const s1Result = checkSystem1(toolName, toolInput);
-  if (s1Result) return s1Result;
-
-  const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
-
-  // ── Script resolution ──────────────────────────────────────────────
-  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
-
-  // Script detected but NOT readable → ESCALATE (can't verify safety)
-  if (unresolved.length > 0) {
-    return {
-      blocked: true,
-      decision: 'ESCALATE',
-      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
-      raw: null,
-    };
-  }
-
-  // ── Build LLM message ──────────────────────────────────────────────
-
-  // Resolve file metadata for Write/Edit (git status, sensitive patterns, staged changes)
-  const fileMeta = resolveFileMetadata(toolName, toolInput);
-
-  let userMessage = `Tool call requiring evaluation:
-
-Tool: ${toolName}
-Input: ${JSON.stringify(toolInput, null, 2)}
-User's instruction: "${userPrompt}"`;
+async function invokeEvaluation(wrapperText, compiledDescription, fileMeta, apiKey, model) {
+  let userMessage = `## Compiled Tool Call Description\n\n${compiledDescription}`;
 
   if (fileMeta) {
     userMessage += '\n\n## File Metadata\n';
@@ -400,20 +323,10 @@ User's instruction: "${userPrompt}"`;
     userMessage += '\n';
   }
 
-  if (resolvedFiles.length > 0) {
-    userMessage += '\n## Referenced File Contents\n';
-    userMessage += 'The following files are referenced by this tool call. Use their contents for DAG flattening — identify all leaf-level operations that will actually execute.\n';
-    for (const { filePath, content } of resolvedFiles) {
-      userMessage += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
-    }
-  }
-
-  userMessage += '\nEvaluate and return your JSON decision.';
-
-  // ── System 2: LLM evaluation ───────────────────────────────────────
+  userMessage += '\nEvaluate this tool call and return your JSON decision.';
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
+  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -436,20 +349,91 @@ User's instruction: "${userPrompt}"`;
     clearTimeout(timeout);
 
     if (!response.ok) {
-      return { blocked: true, decision: 'ESCALATE', reason: `API error: ${response.status}`, raw: null };
+      return { blocked: true, decision: 'ESCALATE', reason: `evaluation API error: ${response.status}`, raw: null };
     }
 
     const result = await response.json();
     return parseResponse(result);
   } catch (err) {
     clearTimeout(timeout);
-    return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null };
+    return { blocked: true, decision: 'ESCALATE', reason: `evaluation error: ${err.message}`, raw: null };
   }
 }
 
+// ── Main evaluation pipeline ─────────────────────────────────────────
+
 /**
- * Parse the LLM response into a structured result.
+ * Evaluate a tool call using two-phase System 2.
+ *
+ * Pipeline:
+ *   1. System 1: deterministic checks (exempt, always-escalate, destructive)
+ *   2. Script resolution: resolve referenced files or ESCALATE
+ *   3. Phase 1 (Compilation): factual analysis of what the tool call does
+ *   4. Phase 2 (Evaluation): moral assessment of the compiled description
+ *
+ * @param {string} wrapperText - The evaluation prompt (Thomistic framework)
+ * @param {string} toolName
+ * @param {object} toolInput
+ * @param {string} userPrompt
+ * @param {string} apiKey
+ * @param {object} [opts]
+ * @param {string} [opts.model] - Model override (used for both phases)
+ * @param {string} [opts.compileModel] - Model override for compilation only
+ * @returns {Promise<{
+ *   blocked: boolean,
+ *   decision: string,
+ *   reason: string,
+ *   raw: object|null,
+ *   compiled: string|null,
+ * }>}
  */
+async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt, apiKey, opts = {}) {
+  if (!apiKey) {
+    return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null, compiled: null };
+  }
+
+  // ── System 1 ─────────────────────────────────────────────────────
+  const s1Result = checkSystem1(toolName, toolInput);
+  if (s1Result) return { ...s1Result, compiled: null };
+
+  const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
+  const compileModel = opts.compileModel || process.env.GA_COMPILE_MODEL || model;
+
+  // ── Script resolution ────────────────────────────────────────────
+  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
+
+  if (unresolved.length > 0) {
+    return {
+      blocked: true,
+      decision: 'ESCALATE',
+      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
+      raw: null,
+      compiled: null,
+    };
+  }
+
+  // ── File metadata ────────────────────────────────────────────────
+  const fileMeta = resolveFileMetadata(toolName, toolInput);
+
+  // ── Phase 1: Compilation ─────────────────────────────────────────
+  const { description: compiled, error: compileError } = await invokeCompilation(
+    toolName, toolInput, userPrompt, resolvedFiles, apiKey, compileModel
+  );
+
+  if (compileError || !compiled) {
+    // Fallback: build a raw description so evaluation can still proceed
+    const fallback = `[Compilation unavailable: ${compileError}]\n\nTool: ${toolName}\nInput: ${JSON.stringify(toolInput, null, 2)}\nUser's instruction: "${userPrompt}"`;
+    const evalResult = await invokeEvaluation(wrapperText, fallback, fileMeta, apiKey, model);
+    return { ...evalResult, compiled: fallback };
+  }
+
+  // ── Phase 2: Evaluation ──────────────────────────────────────────
+  const evalResult = await invokeEvaluation(wrapperText, compiled, fileMeta, apiKey, model);
+  return { ...evalResult, compiled };
+}
+
+// ── Response parsing ─────────────────────────────────────────────────
+
 function parseResponse(apiResult) {
   try {
     const text = apiResult.content[0].text;
@@ -474,15 +458,16 @@ function parseResponse(apiResult) {
   }
 }
 
-/**
- * Check if a tool is exempt from GA evaluation.
- */
+// ── Exports ──────────────────────────────────────────────────────────
+
 function isExempt(toolName) {
   return EXEMPT_TOOLS.has(toolName);
 }
 
 module.exports = {
   evaluateWithWrapper,
+  invokeCompilation,
+  invokeEvaluation,
   loadWrapper,
   parseResponse,
   isExempt,

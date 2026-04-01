@@ -12,7 +12,8 @@
  *
  * What gets installed:
  *   ~/.claude/hooks/guardian-angel.js        — the hook (System 1 + System 2)
- *   ~/.claude/hooks/ga-system2-prompt.txt    — the wrapper prompt
+ *   ~/.claude/hooks/ga-system2-prompt.txt    — the evaluation prompt (Phase 2)
+ *   ~/.claude/hooks/ga-compile-prompt.txt    — the compilation prompt (Phase 1)
  *   ~/.claude/hooks/ga-lib/                  — shared modules
  *     file-metadata.js                       — git status, sensitive patterns
  *     file-resolver.js                       — reads scripts for DAG flattening
@@ -37,13 +38,15 @@ const DRY_RUN   = process.argv.includes('--dry-run');
 const SHOW_DIFF = process.argv.includes('--diff');
 
 // ── Source paths ─────────────────────────────────────────────────────
-const WRAPPER_SRC = path.join(REPO_ROOT, 'tests', 'wrappers', 'default.txt');
+const WRAPPER_SRC  = path.join(REPO_ROOT, 'tests', 'wrappers', 'default.txt');
+const COMPILE_SRC  = path.join(REPO_ROOT, 'tests', 'wrappers', 'compile.txt');
 const GA_WRAPPER_SRC = path.join(REPO_ROOT, 'tests', 'harness', 'ga-wrapper.js');
 
 // ── Destination paths ────────────────────────────────────────────────
-const WRAPPER_DST = path.join(HOOKS_DIR, 'ga-system2-prompt.txt');
-const HOOK_DST    = path.join(HOOKS_DIR, 'guardian-angel.js');
-const REPO_HOOK   = path.join(__dirname, 'hooks', 'guardian-angel.js');
+const WRAPPER_DST  = path.join(HOOKS_DIR, 'ga-system2-prompt.txt');
+const COMPILE_DST  = path.join(HOOKS_DIR, 'ga-compile-prompt.txt');
+const HOOK_DST     = path.join(HOOKS_DIR, 'guardian-angel.js');
+const REPO_HOOK    = path.join(__dirname, 'hooks', 'guardian-angel.js');
 
 // ── Extract modules from test ga-wrapper.js ──────────────────────────
 
@@ -205,9 +208,15 @@ function buildProductionHook() {
   let hook = fs.readFileSync(TEMPLATE_PATH, 'utf8');
   const { destructiveStr, escalateStr } = extractFromTestSource();
 
-  // 1. Replace embedded SYSTEM2_PROMPT with file loader
+  // 1. Replace embedded SYSTEM2_PROMPT with file loaders for both prompts
   const promptLoadCode = `const SYSTEM2_PROMPT = (() => {
   const promptPath = require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-system2-prompt.txt');
+  try { return require('fs').readFileSync(promptPath, 'utf8'); }
+  catch { return null; }
+})();
+
+const COMPILE_PROMPT = (() => {
+  const promptPath = require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-compile-prompt.txt');
   try { return require('fs').readFileSync(promptPath, 'utf8'); }
   catch { return null; }
 })()`;
@@ -237,6 +246,8 @@ const DESTRUCTIVE_BASH_PATTERNS = ${destructiveStr};
 
 // Tools that always require escalation
 const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
+
+const PHASE_TIMEOUT = 10000; // 10s per phase
 `;
 
   const modelLine = hook.indexOf("const SYSTEM2_MODEL");
@@ -273,67 +284,149 @@ const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
     hook = hook.slice(0, s2Idx) + destructiveCheck + hook.slice(s2Idx);
   }
 
-  // 5. Patch buildSystem2UserMessage to include file metadata + resolved files + unresolved escalation
+  // 5. Replace buildSystem2UserMessage + invokeSystem2 with two-phase implementation
   const oldMsgBuilder = hook.match(/function buildSystem2UserMessage\(promptClass\) \{[\s\S]*?return sections\.join\('\\n'\);\n\}/);
   if (oldMsgBuilder) {
-    const newMsgBuilder = `function buildSystem2UserMessage(promptClass) {
-  const sections = [
-    \`Tool call requiring moral evaluation:\`,
-    \`\`,
-    \`TOOL: \${toolName}\`,
-    \`INPUT: \${JSON.stringify(toolInput, null, 2)}\`,
-  ];
-
-  if (promptClass && promptClass.prompt) {
-    sections.push(
-      \`\`,
-      \`## User's Prompt\`,
-      \`"\${promptClass.prompt}"\`,
-      \`Classification: \${promptClass.isAgentic ? 'AGENTIC' : 'INFORMATIONAL'}\${promptClass.actionWords.length > 0 ? ' (action words: ' + promptClass.actionWords.join(', ') + ')' : ''}\`,
-    );
-  }
-
-  // File metadata for Write/Edit (git status, sensitive patterns, staged changes)
-  const fileMeta = resolveFileMetadata(toolName, toolInput);
-  if (fileMeta) {
-    sections.push(
-      \`\`,
-      \`## File Metadata\`,
-      \`Path: \${fileMeta.path}\`,
-      \`In git repo: \${fileMeta.in_git_repo}\`,
-      \`Git tracked: \${fileMeta.git_tracked}\`,
-      \`Has staged changes: \${fileMeta.has_staged_changes}\`,
-      \`Sensitive file: \${fileMeta.is_sensitive}\${fileMeta.sensitive_reason ? ' (' + fileMeta.sensitive_reason + ')' : ''}\`,
-    );
-  }
-
-  // Referenced file contents for DAG flattening (script execution)
+    const twoPhaseCode = `// ── Phase 1: Compilation (factual analysis) ─────────────────────────
+function buildCompilationMessage(promptClass) {
   const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
 
-  // Script detected but not readable → escalate before reaching LLM
+  // Script detected but not readable → escalate
   if (unresolved.length > 0) {
     escalate(\`Cannot read referenced script(s) for safety analysis: \${unresolved.join(', ')}\`,
              'n/a', 'n/a', 'unresolved-script', coherence, affective, provenance);
   }
 
+  let msg = \`Tool: \${toolName}\\nInput: \${JSON.stringify(toolInput, null, 2)}\`;
+  if (promptClass && promptClass.prompt) {
+    msg += \`\\nUser's instruction: "\${promptClass.prompt}"\`;
+  }
+
   if (resolvedFiles.length > 0) {
-    sections.push(\`\`, \`## Referenced File Contents\`);
-    sections.push(\`The following files are referenced by this tool call. Use their contents for DAG flattening.\`);
+    msg += '\\n\\n## Referenced File Contents\\n';
     for (const { filePath, content } of resolvedFiles) {
-      sections.push(\`\`, \`### \${filePath}\`, \`\\\`\\\`\\\`\`, content, \`\\\`\\\`\\\`\`);
+      msg += \`\\n### \${filePath}\\n\\\`\\\`\\\`\\n\${content}\\n\\\`\\\`\\\`\\n\`;
     }
   }
 
-  sections.push(
-    \`\`,
-    \`Evaluate this action through the Thomistic conscience framework. Compute the Gate V score (Clarity x Stakes) and return your JSON decision.\`,
-  );
+  msg += '\\n\\nAnalyze this tool call and produce your structured description.';
+  return msg;
+}
 
-  return sections.join('\\n');
+async function invokeCompilation(promptClass) {
+  if (!COMPILE_PROMPT) return { description: null, error: 'no compile prompt' };
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { description: null, error: 'no API key' };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: SYSTEM2_MODEL,
+        max_tokens: 1024,
+        temperature: 0,
+        system: COMPILE_PROMPT,
+        messages: [{ role: 'user', content: buildCompilationMessage(promptClass) }],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return { description: null, error: \`API error: \${response.status}\` };
+    const result = await response.json();
+    return { description: result.content[0].text, error: null };
+  } catch (err) {
+    clearTimeout(timeout);
+    return { description: null, error: err.message };
+  }
+}
+
+// ── Phase 2: Evaluation (moral assessment) ──────────────────────────
+function buildEvaluationMessage(compiledDescription) {
+  const fileMeta = resolveFileMetadata(toolName, toolInput);
+  let msg = \`## Compiled Tool Call Description\\n\\n\${compiledDescription}\`;
+
+  if (fileMeta) {
+    msg += '\\n\\n## File Metadata\\n';
+    msg += \`Path: \${fileMeta.path}\\n\`;
+    msg += \`In git repo: \${fileMeta.in_git_repo}\\n\`;
+    msg += \`Git tracked: \${fileMeta.git_tracked}\\n\`;
+    msg += \`Has staged changes: \${fileMeta.has_staged_changes}\\n\`;
+    msg += \`Sensitive file: \${fileMeta.is_sensitive}\${fileMeta.sensitive_reason ? ' (' + fileMeta.sensitive_reason + ')' : ''}\\n\`;
+  }
+
+  msg += '\\nEvaluate this tool call and return your JSON decision.';
+  return msg;
+}
+
+function buildSystem2UserMessage(promptClass) {
+  // Legacy fallback — only used if compilation fails
+  return buildCompilationMessage(promptClass);
 }`;
 
-    hook = hook.replace(oldMsgBuilder[0], newMsgBuilder);
+    hook = hook.replace(oldMsgBuilder[0], twoPhaseCode);
   }
+
+  // 6. Replace invokeSystem2 to use two-phase pipeline
+  const oldInvokeS2 = hook.match(/async function invokeSystem2\(promptClass\) \{[\s\S]*?\n\}/);
+  if (oldInvokeS2) {
+    const newInvokeS2 = `async function invokeSystem2(promptClass) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return { decision: 'ESCALATE', reason: 'System 2 unavailable: no ANTHROPIC_API_KEY', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+  }
+
+  // Phase 1: Compilation
+  const { description: compiled, error: compileError } = await invokeCompilation(promptClass);
+
+  let evaluationInput;
+  if (compileError || !compiled) {
+    // Fallback: send raw info directly to evaluator
+    evaluationInput = buildSystem2UserMessage(promptClass);
+  } else {
+    evaluationInput = buildEvaluationMessage(compiled);
+  }
+
+  // Phase 2: Evaluation
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: SYSTEM2_MODEL,
+        max_tokens: 512,
+        temperature: 0,
+        system: SYSTEM2_PROMPT,
+        messages: [{ role: 'user', content: evaluationInput }],
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    if (!response.ok) {
+      return { decision: 'ESCALATE', reason: \`System 2 API error: \${response.status}\`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    }
+
+    const result = await response.json();
+    return parseSystem2Response(result);
+  } catch (err) {
+    clearTimeout(timeout);
+    return { decision: 'ESCALATE', reason: \`System 2 error: \${err.message}\`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+  }
+}`;
+
+    hook = hook.replace(oldInvokeS2[0], newInvokeS2);
+  }
+
+  // 7. Update fail-closed timeout from 18s to 28s for two-phase pipeline
+  hook = hook.replace(/}, 18000\);/, '}, 28000);');
 
   return hook;
 }
@@ -345,7 +438,8 @@ function install() {
   console.log('');
 
   const files = [
-    { dst: WRAPPER_DST, content: fs.readFileSync(WRAPPER_SRC, 'utf8'), label: 'Wrapper prompt' },
+    { dst: WRAPPER_DST, content: fs.readFileSync(WRAPPER_SRC, 'utf8'), label: 'Evaluation prompt' },
+    { dst: COMPILE_DST, content: fs.readFileSync(COMPILE_SRC, 'utf8'), label: 'Compilation prompt' },
     { dst: path.join(GA_LIB_DIR, 'file-metadata.js'), content: buildFileMetadata(), label: 'File metadata module' },
     { dst: path.join(GA_LIB_DIR, 'file-resolver.js'), content: buildFileResolver(), label: 'File resolver module' },
     { dst: HOOK_DST, content: buildProductionHook(), label: 'Hook script' },
