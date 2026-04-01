@@ -37,7 +37,7 @@ const os     = require('os');
 setTimeout(() => {
   process.stderr.write('GUARDIAN_ANGEL_BLOCK|Evaluation timeout — failing closed\n');
   process.exit(2);
-}, 28000);
+}, 18000);
 
 // ── Config ────────────────────────────────────────────────────────────
 const HOOK_DIR             = path.join(os.homedir(), '.claude', 'hooks');
@@ -83,7 +83,6 @@ const DESTRUCTIVE_BASH_PATTERNS = [
 // Tools that always require escalation
 const ALWAYS_ESCALATE_TOOLS = new Set(/* populate as needed */ []);
 
-const PHASE_TIMEOUT = 10000; // 10s per phase
 
 // Tools exempt from evaluation (read-only, no lasting side effects)
 const NEVER_BLOCK = new Set([
@@ -351,16 +350,40 @@ const SYSTEM2_PROMPT = (() => {
   const promptPath = require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-system2-prompt.txt');
   try { return require('fs').readFileSync(promptPath, 'utf8'); }
   catch { return null; }
-})();
-
-const COMPILE_PROMPT = (() => {
-  const promptPath = require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-compile-prompt.txt');
-  try { return require('fs').readFileSync(promptPath, 'utf8'); }
-  catch { return null; }
 })()
 
-// ── Phase 1: Compilation (factual analysis) ─────────────────────────
-function buildCompilationMessage(promptClass) {
+function buildSystem2UserMessage(promptClass) {
+  const sections = [
+    `Tool call requiring evaluation:`,
+    ``,
+    `Tool: ${toolName}`,
+    `Input: ${JSON.stringify(toolInput, null, 2)}`,
+  ];
+
+  if (promptClass && promptClass.prompt) {
+    sections.push(
+      ``,
+      `## User's Prompt`,
+      `"${promptClass.prompt}"`,
+      `Classification: ${promptClass.isAgentic ? 'AGENTIC' : 'INFORMATIONAL'}${promptClass.actionWords.length > 0 ? ' (action words: ' + promptClass.actionWords.join(', ') + ')' : ''}`,
+    );
+  }
+
+  // File metadata for Write/Edit
+  const fileMeta = resolveFileMetadata(toolName, toolInput);
+  if (fileMeta) {
+    sections.push(
+      ``,
+      `## File Metadata`,
+      `Path: ${fileMeta.path}`,
+      `In git repo: ${fileMeta.in_git_repo}`,
+      `Git tracked: ${fileMeta.git_tracked}`,
+      `Has staged changes: ${fileMeta.has_staged_changes}`,
+      `Sensitive file: ${fileMeta.is_sensitive}${fileMeta.sensitive_reason ? ' (' + fileMeta.sensitive_reason + ')' : ''}`,
+    );
+  }
+
+  // Referenced file contents for DAG flattening
   const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
 
   // Script detected but not readable → escalate
@@ -369,75 +392,20 @@ function buildCompilationMessage(promptClass) {
              'n/a', 'n/a', 'unresolved-script', coherence, affective, provenance);
   }
 
-  let msg = `Tool: ${toolName}\nInput: ${JSON.stringify(toolInput, null, 2)}`;
-  if (promptClass && promptClass.prompt) {
-    msg += `\nUser's instruction: "${promptClass.prompt}"`;
-  }
-
   if (resolvedFiles.length > 0) {
-    msg += '\n\n## Referenced File Contents\n';
+    sections.push(``, `## Referenced File Contents`);
+    sections.push(`Use these contents to enumerate all leaf operations in Step 1 of your analysis.`);
     for (const { filePath, content } of resolvedFiles) {
-      msg += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
+      sections.push(``, `### ${filePath}`, `\`\`\``, content, `\`\`\``);
     }
   }
 
-  msg += '\n\nAnalyze this tool call and produce your structured description.';
-  return msg;
-}
+  sections.push(
+    ``,
+    `Perform your two-step analysis (compile, then evaluate) and return your JSON decision.`,
+  );
 
-async function invokeCompilation(promptClass) {
-  if (!COMPILE_PROMPT) return { description: null, error: 'no compile prompt' };
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return { description: null, error: 'no API key' };
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
-
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: SYSTEM2_MODEL,
-        max_tokens: 1024,
-        temperature: 0,
-        system: COMPILE_PROMPT,
-        messages: [{ role: 'user', content: buildCompilationMessage(promptClass) }],
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!response.ok) return { description: null, error: `API error: ${response.status}` };
-    const result = await response.json();
-    return { description: result.content[0].text, error: null };
-  } catch (err) {
-    clearTimeout(timeout);
-    return { description: null, error: err.message };
-  }
-}
-
-// ── Phase 2: Evaluation (moral assessment) ──────────────────────────
-function buildEvaluationMessage(compiledDescription) {
-  const fileMeta = resolveFileMetadata(toolName, toolInput);
-  let msg = `## Compiled Tool Call Description\n\n${compiledDescription}`;
-
-  if (fileMeta) {
-    msg += '\n\n## File Metadata\n';
-    msg += `Path: ${fileMeta.path}\n`;
-    msg += `In git repo: ${fileMeta.in_git_repo}\n`;
-    msg += `Git tracked: ${fileMeta.git_tracked}\n`;
-    msg += `Has staged changes: ${fileMeta.has_staged_changes}\n`;
-    msg += `Sensitive file: ${fileMeta.is_sensitive}${fileMeta.sensitive_reason ? ' (' + fileMeta.sensitive_reason + ')' : ''}\n`;
-  }
-
-  msg += '\nEvaluate this tool call and return your JSON decision.';
-  return msg;
-}
-
-function buildSystem2UserMessage(promptClass) {
-  // Legacy fallback — only used if compilation fails
-  return buildCompilationMessage(promptClass);
+  return sections.join('\n');
 }
 
 async function invokeSystem2(promptClass) {
@@ -446,36 +414,29 @@ async function invokeSystem2(promptClass) {
     return { decision: 'ESCALATE', reason: 'System 2 unavailable: no ANTHROPIC_API_KEY', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
   }
 
-  // Phase 1: Compilation
-  const { description: compiled, error: compileError } = await invokeCompilation(promptClass);
-
-  let evaluationInput;
-  if (compileError || !compiled) {
-    // Fallback: send raw info directly to evaluator
-    evaluationInput = buildSystem2UserMessage(promptClass);
-  } else {
-    evaluationInput = buildEvaluationMessage(compiled);
-  }
-
-  // Phase 2: Evaluation
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
+  const timeout = setTimeout(() => controller.abort(), SYSTEM2_API_TIMEOUT);
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
       body: JSON.stringify({
         model: SYSTEM2_MODEL,
-        max_tokens: 512,
+        max_tokens: 1024,
         temperature: 0,
         system: SYSTEM2_PROMPT,
-        messages: [{ role: 'user', content: evaluationInput }],
+        messages: [{ role: 'user', content: buildSystem2UserMessage(promptClass) }],
       }),
       signal: controller.signal,
     });
 
     clearTimeout(timeout);
+
     if (!response.ok) {
       return { decision: 'ESCALATE', reason: `System 2 API error: ${response.status}`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
     }
@@ -491,8 +452,12 @@ async function invokeSystem2(promptClass) {
 function parseSystem2Response(apiResult) {
   try {
     const text = apiResult.content[0].text;
-    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed = JSON.parse(cleaned);
+    // Response may contain chain-of-thought before JSON — extract the JSON object
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return { decision: 'ESCALATE', reason: 'System 2: no JSON found in response', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
 
     const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK']);
     if (!validDecisions.has(parsed.decision)) {

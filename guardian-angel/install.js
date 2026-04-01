@@ -208,15 +208,9 @@ function buildProductionHook() {
   let hook = fs.readFileSync(TEMPLATE_PATH, 'utf8');
   const { destructiveStr, escalateStr } = extractFromTestSource();
 
-  // 1. Replace embedded SYSTEM2_PROMPT with file loaders for both prompts
+  // 1. Replace embedded SYSTEM2_PROMPT with file loader
   const promptLoadCode = `const SYSTEM2_PROMPT = (() => {
   const promptPath = require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-system2-prompt.txt');
-  try { return require('fs').readFileSync(promptPath, 'utf8'); }
-  catch { return null; }
-})();
-
-const COMPILE_PROMPT = (() => {
-  const promptPath = require('path').join(require('os').homedir(), '.claude', 'hooks', 'ga-compile-prompt.txt');
   try { return require('fs').readFileSync(promptPath, 'utf8'); }
   catch { return null; }
 })()`;
@@ -247,7 +241,6 @@ const DESTRUCTIVE_BASH_PATTERNS = ${destructiveStr};
 // Tools that always require escalation
 const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
 
-const PHASE_TIMEOUT = 10000; // 10s per phase
 `;
 
   const modelLine = hook.indexOf("const SYSTEM2_MODEL");
@@ -284,11 +277,41 @@ const PHASE_TIMEOUT = 10000; // 10s per phase
     hook = hook.slice(0, s2Idx) + destructiveCheck + hook.slice(s2Idx);
   }
 
-  // 5. Replace buildSystem2UserMessage + invokeSystem2 with two-phase implementation
+  // 5. Patch buildSystem2UserMessage to include file metadata + resolved files
   const oldMsgBuilder = hook.match(/function buildSystem2UserMessage\(promptClass\) \{[\s\S]*?return sections\.join\('\\n'\);\n\}/);
   if (oldMsgBuilder) {
-    const twoPhaseCode = `// ── Phase 1: Compilation (factual analysis) ─────────────────────────
-function buildCompilationMessage(promptClass) {
+    const newMsgBuilder = `function buildSystem2UserMessage(promptClass) {
+  const sections = [
+    \`Tool call requiring evaluation:\`,
+    \`\`,
+    \`Tool: \${toolName}\`,
+    \`Input: \${JSON.stringify(toolInput, null, 2)}\`,
+  ];
+
+  if (promptClass && promptClass.prompt) {
+    sections.push(
+      \`\`,
+      \`## User's Prompt\`,
+      \`"\${promptClass.prompt}"\`,
+      \`Classification: \${promptClass.isAgentic ? 'AGENTIC' : 'INFORMATIONAL'}\${promptClass.actionWords.length > 0 ? ' (action words: ' + promptClass.actionWords.join(', ') + ')' : ''}\`,
+    );
+  }
+
+  // File metadata for Write/Edit
+  const fileMeta = resolveFileMetadata(toolName, toolInput);
+  if (fileMeta) {
+    sections.push(
+      \`\`,
+      \`## File Metadata\`,
+      \`Path: \${fileMeta.path}\`,
+      \`In git repo: \${fileMeta.in_git_repo}\`,
+      \`Git tracked: \${fileMeta.git_tracked}\`,
+      \`Has staged changes: \${fileMeta.has_staged_changes}\`,
+      \`Sensitive file: \${fileMeta.is_sensitive}\${fileMeta.sensitive_reason ? ' (' + fileMeta.sensitive_reason + ')' : ''}\`,
+    );
+  }
+
+  // Referenced file contents for DAG flattening
   const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
 
   // Script detected but not readable → escalate
@@ -297,136 +320,64 @@ function buildCompilationMessage(promptClass) {
              'n/a', 'n/a', 'unresolved-script', coherence, affective, provenance);
   }
 
-  let msg = \`Tool: \${toolName}\\nInput: \${JSON.stringify(toolInput, null, 2)}\`;
-  if (promptClass && promptClass.prompt) {
-    msg += \`\\nUser's instruction: "\${promptClass.prompt}"\`;
-  }
-
   if (resolvedFiles.length > 0) {
-    msg += '\\n\\n## Referenced File Contents\\n';
+    sections.push(\`\`, \`## Referenced File Contents\`);
+    sections.push(\`Use these contents to enumerate all leaf operations in Step 1 of your analysis.\`);
     for (const { filePath, content } of resolvedFiles) {
-      msg += \`\\n### \${filePath}\\n\\\`\\\`\\\`\\n\${content}\\n\\\`\\\`\\\`\\n\`;
+      sections.push(\`\`, \`### \${filePath}\`, \`\\\`\\\`\\\`\`, content, \`\\\`\\\`\\\`\`);
     }
   }
 
-  msg += '\\n\\nAnalyze this tool call and produce your structured description.';
-  return msg;
-}
+  sections.push(
+    \`\`,
+    \`Perform your two-step analysis (compile, then evaluate) and return your JSON decision.\`,
+  );
 
-async function invokeCompilation(promptClass) {
-  if (!COMPILE_PROMPT) return { description: null, error: 'no compile prompt' };
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return { description: null, error: 'no API key' };
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
-
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: SYSTEM2_MODEL,
-        max_tokens: 1024,
-        temperature: 0,
-        system: COMPILE_PROMPT,
-        messages: [{ role: 'user', content: buildCompilationMessage(promptClass) }],
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!response.ok) return { description: null, error: \`API error: \${response.status}\` };
-    const result = await response.json();
-    return { description: result.content[0].text, error: null };
-  } catch (err) {
-    clearTimeout(timeout);
-    return { description: null, error: err.message };
-  }
-}
-
-// ── Phase 2: Evaluation (moral assessment) ──────────────────────────
-function buildEvaluationMessage(compiledDescription) {
-  const fileMeta = resolveFileMetadata(toolName, toolInput);
-  let msg = \`## Compiled Tool Call Description\\n\\n\${compiledDescription}\`;
-
-  if (fileMeta) {
-    msg += '\\n\\n## File Metadata\\n';
-    msg += \`Path: \${fileMeta.path}\\n\`;
-    msg += \`In git repo: \${fileMeta.in_git_repo}\\n\`;
-    msg += \`Git tracked: \${fileMeta.git_tracked}\\n\`;
-    msg += \`Has staged changes: \${fileMeta.has_staged_changes}\\n\`;
-    msg += \`Sensitive file: \${fileMeta.is_sensitive}\${fileMeta.sensitive_reason ? ' (' + fileMeta.sensitive_reason + ')' : ''}\\n\`;
-  }
-
-  msg += '\\nEvaluate this tool call and return your JSON decision.';
-  return msg;
-}
-
-function buildSystem2UserMessage(promptClass) {
-  // Legacy fallback — only used if compilation fails
-  return buildCompilationMessage(promptClass);
+  return sections.join('\\n');
 }`;
 
-    hook = hook.replace(oldMsgBuilder[0], twoPhaseCode);
+    hook = hook.replace(oldMsgBuilder[0], newMsgBuilder);
   }
 
-  // 6. Replace invokeSystem2 to use two-phase pipeline
-  const oldInvokeS2 = hook.match(/async function invokeSystem2\(promptClass\) \{[\s\S]*?\n\}/);
-  if (oldInvokeS2) {
-    const newInvokeS2 = `async function invokeSystem2(promptClass) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return { decision: 'ESCALATE', reason: 'System 2 unavailable: no ANTHROPIC_API_KEY', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
-  }
+  // 6. Update max_tokens from 512 to 1024 for chain-of-thought response
+  hook = hook.replace(
+    /max_tokens: 512,\n\s*temperature: 0,\n\s*system: SYSTEM2_PROMPT,/,
+    'max_tokens: 1024,\n        temperature: 0,\n        system: SYSTEM2_PROMPT,'
+  );
 
-  // Phase 1: Compilation
-  const { description: compiled, error: compileError } = await invokeCompilation(promptClass);
-
-  let evaluationInput;
-  if (compileError || !compiled) {
-    // Fallback: send raw info directly to evaluator
-    evaluationInput = buildSystem2UserMessage(promptClass);
-  } else {
-    evaluationInput = buildEvaluationMessage(compiled);
-  }
-
-  // Phase 2: Evaluation
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
-
+  // 7. Update parseSystem2Response to handle chain-of-thought (JSON may follow text)
+  const oldParser = hook.match(/function parseSystem2Response\(apiResult\) \{[\s\S]*?\n\}/);
+  if (oldParser) {
+    const newParser = `function parseSystem2Response(apiResult) {
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: SYSTEM2_MODEL,
-        max_tokens: 512,
-        temperature: 0,
-        system: SYSTEM2_PROMPT,
-        messages: [{ role: 'user', content: evaluationInput }],
-      }),
-      signal: controller.signal,
-    });
+    const text = apiResult.content[0].text;
+    // Response may contain chain-of-thought before JSON — extract the JSON object
+    const jsonMatch = text.match(/\\{[\\s\\S]*\\}/);
+    if (!jsonMatch) {
+      return { decision: 'ESCALATE', reason: 'System 2: no JSON found in response', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
 
-    clearTimeout(timeout);
-    if (!response.ok) {
-      return { decision: 'ESCALATE', reason: \`System 2 API error: \${response.status}\`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK']);
+    if (!validDecisions.has(parsed.decision)) {
+      return { decision: 'ESCALATE', reason: \`System 2 invalid decision: \${parsed.decision}\`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
     }
 
-    const result = await response.json();
-    return parseSystem2Response(result);
+    return {
+      decision:           parsed.decision,
+      reason:             parsed.rationale || parsed.convergence_summary || 'System 2 deliberation',
+      gateP:              parsed.gate_p || 'UNKNOWN',
+      synderesis:         parsed.synderesis || { pass: true, violation: null },
+      gateV:              parsed.gate_v || { clarity: null, stakes: null, score: null },
+      convergenceSummary: parsed.convergence_summary || null,
+    };
   } catch (err) {
-    clearTimeout(timeout);
-    return { decision: 'ESCALATE', reason: \`System 2 error: \${err.message}\`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    return { decision: 'ESCALATE', reason: \`System 2 parse error: \${err.message}\`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
   }
 }`;
 
-    hook = hook.replace(oldInvokeS2[0], newInvokeS2);
+    hook = hook.replace(oldParser[0], newParser);
   }
-
-  // 7. Update fail-closed timeout from 18s to 28s for two-phase pipeline
-  hook = hook.replace(/}, 18000\);/, '}, 28000);');
 
   return hook;
 }

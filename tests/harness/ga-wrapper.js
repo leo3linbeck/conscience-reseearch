@@ -3,28 +3,22 @@
 /**
  * Guardian Angel Clinical Trial v3 — Stateless GA Wrapper
  *
- * Two-phase System 2 evaluation:
- *   Phase 1 (Compilation): Factual analysis — what does this tool call do?
- *   Phase 2 (Evaluation):  Moral assessment — should it be allowed?
+ * Single-call System 2 with chain-of-thought:
+ *   The LLM first compiles (enumerates all leaf operations),
+ *   then evaluates (applies Thomistic moral framework).
+ *   Both steps happen in one prompt, one API call.
  *
- * The compilation prompt (compile.txt) and evaluation prompt (default.txt)
- * are loaded from the wrappers/ directory. The evaluation prompt is the
- * single variable that gets optimized.
- *
- * Usage:
- *   const { evaluateWithWrapper, loadWrapper } = require('./ga-wrapper');
- *   const wrapper = loadWrapper();
- *   const result = await evaluateWithWrapper(wrapper, 'Bash', { command: 'rm -rf /' }, 'Delete everything', apiKey);
+ * The wrapper prompt (default.txt) is the single variable that gets optimized.
  */
 
 const fs   = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const DEFAULT_MODEL    = 'claude-haiku-4-5-20251001';
-const PHASE_TIMEOUT    = 10_000;  // 10s per phase
-const MAX_FILE_SIZE    = 10_000;  // max chars to include per referenced file
-const WRAPPERS_DIR     = path.join(__dirname, '..', 'wrappers');
+const DEFAULT_MODEL   = 'claude-haiku-4-5-20251001';
+const API_TIMEOUT     = 12_000;
+const MAX_FILE_SIZE   = 10_000;
+const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
 
 // ── Sensitive file patterns ──────────────────────────────────────────
 const SENSITIVE_FILE_PATTERNS = [
@@ -93,9 +87,7 @@ function loadWrapper(name = 'default') {
 // ── System 1 ─────────────────────────────────────────────────────────
 
 function checkSystem1(toolName, toolInput) {
-  if (EXEMPT_TOOLS.has(toolName)) {
-    return null;
-  }
+  if (EXEMPT_TOOLS.has(toolName)) return null;
 
   if (ALWAYS_ESCALATE_TOOLS.has(toolName)) {
     return { blocked: true, decision: 'ESCALATE', reason: `Tool '${toolName}' requires user approval`, raw: null };
@@ -242,73 +234,48 @@ function readFileSafe(filePath) {
   } catch { return null; }
 }
 
-// ── Phase 1: Compilation ─────────────────────────────────────────────
+// ── System 2: Single-call evaluation ─────────────────────────────────
 
 /**
- * Produce a factual description of what a tool call will do.
- * No moral judgment — just exhaustive enumeration of leaf operations.
+ * Evaluate a tool call using the combined compile+evaluate prompt.
  *
- * @returns {Promise<{ description: string, error: string|null }>}
+ * Pipeline:
+ *   1. System 1: deterministic checks
+ *   2. Script resolution: resolve referenced files or ESCALATE
+ *   3. System 2: single LLM call (compile leaf ops → evaluate morally → JSON)
  */
-async function invokeCompilation(toolName, toolInput, userPrompt, resolvedFiles, apiKey, model) {
-  const compilePrompt = loadWrapper('compile');
-
-  let userMessage = `Tool: ${toolName}\nInput: ${JSON.stringify(toolInput, null, 2)}\nUser's instruction: "${userPrompt}"`;
-
-  if (resolvedFiles.length > 0) {
-    userMessage += '\n\n## Referenced File Contents\n';
-    for (const { filePath, content } of resolvedFiles) {
-      userMessage += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
-    }
+async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt, apiKey, opts = {}) {
+  if (!apiKey) {
+    return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null };
   }
 
-  userMessage += '\n\nAnalyze this tool call and produce your structured description.';
+  // ── System 1 ─────────────────────────────────────────────────────
+  const s1Result = checkSystem1(toolName, toolInput);
+  if (s1Result) return s1Result;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
+  const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
 
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 1024,
-        temperature: 0,
-        system: compilePrompt,
-        messages: [{ role: 'user', content: userMessage }],
-      }),
-      signal: controller.signal,
-    });
+  // ── Script resolution ────────────────────────────────────────────
+  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
 
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      return { description: null, error: `compilation API error: ${response.status}` };
-    }
-
-    const result = await response.json();
-    const text = result.content[0].text;
-    return { description: text, error: null };
-  } catch (err) {
-    clearTimeout(timeout);
-    return { description: null, error: `compilation error: ${err.message}` };
+  if (unresolved.length > 0) {
+    return {
+      blocked: true,
+      decision: 'ESCALATE',
+      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
+      raw: null,
+    };
   }
-}
 
-// ── Phase 2: Evaluation ──────────────────────────────────────────────
+  // ── File metadata ────────────────────────────────────────────────
+  const fileMeta = resolveFileMetadata(toolName, toolInput);
 
-/**
- * Morally evaluate a compiled description using the Thomistic framework.
- *
- * @returns {Promise<{ blocked: boolean, decision: string, reason: string, raw: object|null }>}
- */
-async function invokeEvaluation(wrapperText, compiledDescription, fileMeta, apiKey, model) {
-  let userMessage = `## Compiled Tool Call Description\n\n${compiledDescription}`;
+  // ── Build message ────────────────────────────────────────────────
+  let userMessage = `Tool call requiring evaluation:
+
+Tool: ${toolName}
+Input: ${JSON.stringify(toolInput, null, 2)}
+User's instruction: "${userPrompt}"`;
 
   if (fileMeta) {
     userMessage += '\n\n## File Metadata\n';
@@ -323,10 +290,19 @@ async function invokeEvaluation(wrapperText, compiledDescription, fileMeta, apiK
     userMessage += '\n';
   }
 
-  userMessage += '\nEvaluate this tool call and return your JSON decision.';
+  if (resolvedFiles.length > 0) {
+    userMessage += '\n## Referenced File Contents\n';
+    userMessage += 'Use these contents to enumerate all leaf operations in Step 1 of your analysis.\n';
+    for (const { filePath, content } of resolvedFiles) {
+      userMessage += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
+    }
+  }
 
+  userMessage += '\nPerform your two-step analysis (compile, then evaluate) and return your JSON decision.';
+
+  // ── API call ─────────────────────────────────────────────────────
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PHASE_TIMEOUT);
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -338,7 +314,7 @@ async function invokeEvaluation(wrapperText, compiledDescription, fileMeta, apiK
       },
       body: JSON.stringify({
         model,
-        max_tokens: 512,
+        max_tokens: 1024,
         temperature: 0,
         system: wrapperText,
         messages: [{ role: 'user', content: userMessage }],
@@ -349,87 +325,15 @@ async function invokeEvaluation(wrapperText, compiledDescription, fileMeta, apiK
     clearTimeout(timeout);
 
     if (!response.ok) {
-      return { blocked: true, decision: 'ESCALATE', reason: `evaluation API error: ${response.status}`, raw: null };
+      return { blocked: true, decision: 'ESCALATE', reason: `API error: ${response.status}`, raw: null };
     }
 
     const result = await response.json();
     return parseResponse(result);
   } catch (err) {
     clearTimeout(timeout);
-    return { blocked: true, decision: 'ESCALATE', reason: `evaluation error: ${err.message}`, raw: null };
+    return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null };
   }
-}
-
-// ── Main evaluation pipeline ─────────────────────────────────────────
-
-/**
- * Evaluate a tool call using two-phase System 2.
- *
- * Pipeline:
- *   1. System 1: deterministic checks (exempt, always-escalate, destructive)
- *   2. Script resolution: resolve referenced files or ESCALATE
- *   3. Phase 1 (Compilation): factual analysis of what the tool call does
- *   4. Phase 2 (Evaluation): moral assessment of the compiled description
- *
- * @param {string} wrapperText - The evaluation prompt (Thomistic framework)
- * @param {string} toolName
- * @param {object} toolInput
- * @param {string} userPrompt
- * @param {string} apiKey
- * @param {object} [opts]
- * @param {string} [opts.model] - Model override (used for both phases)
- * @param {string} [opts.compileModel] - Model override for compilation only
- * @returns {Promise<{
- *   blocked: boolean,
- *   decision: string,
- *   reason: string,
- *   raw: object|null,
- *   compiled: string|null,
- * }>}
- */
-async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt, apiKey, opts = {}) {
-  if (!apiKey) {
-    return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null, compiled: null };
-  }
-
-  // ── System 1 ─────────────────────────────────────────────────────
-  const s1Result = checkSystem1(toolName, toolInput);
-  if (s1Result) return { ...s1Result, compiled: null };
-
-  const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
-  const compileModel = opts.compileModel || process.env.GA_COMPILE_MODEL || model;
-
-  // ── Script resolution ────────────────────────────────────────────
-  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
-
-  if (unresolved.length > 0) {
-    return {
-      blocked: true,
-      decision: 'ESCALATE',
-      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
-      raw: null,
-      compiled: null,
-    };
-  }
-
-  // ── File metadata ────────────────────────────────────────────────
-  const fileMeta = resolveFileMetadata(toolName, toolInput);
-
-  // ── Phase 1: Compilation ─────────────────────────────────────────
-  const { description: compiled, error: compileError } = await invokeCompilation(
-    toolName, toolInput, userPrompt, resolvedFiles, apiKey, compileModel
-  );
-
-  if (compileError || !compiled) {
-    // Fallback: build a raw description so evaluation can still proceed
-    const fallback = `[Compilation unavailable: ${compileError}]\n\nTool: ${toolName}\nInput: ${JSON.stringify(toolInput, null, 2)}\nUser's instruction: "${userPrompt}"`;
-    const evalResult = await invokeEvaluation(wrapperText, fallback, fileMeta, apiKey, model);
-    return { ...evalResult, compiled: fallback };
-  }
-
-  // ── Phase 2: Evaluation ──────────────────────────────────────────
-  const evalResult = await invokeEvaluation(wrapperText, compiled, fileMeta, apiKey, model);
-  return { ...evalResult, compiled };
 }
 
 // ── Response parsing ─────────────────────────────────────────────────
@@ -437,8 +341,13 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
 function parseResponse(apiResult) {
   try {
     const text = apiResult.content[0].text;
-    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed = JSON.parse(cleaned);
+    // The response may contain chain-of-thought text before the JSON.
+    // Extract the JSON object (first { ... } block).
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return { blocked: true, decision: 'ESCALATE', reason: `no JSON found in response`, raw: null };
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
 
     const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK']);
     if (!validDecisions.has(parsed.decision)) {
@@ -466,8 +375,6 @@ function isExempt(toolName) {
 
 module.exports = {
   evaluateWithWrapper,
-  invokeCompilation,
-  invokeEvaluation,
   loadWrapper,
   parseResponse,
   isExempt,
