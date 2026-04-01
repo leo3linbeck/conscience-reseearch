@@ -51,9 +51,10 @@ const SYSTEM2_MODEL        = 'claude-haiku-4-5-20251001';
 // Tools exempt from evaluation (read-only, no lasting side effects)
 const NEVER_BLOCK = new Set([
   'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
-  'Agent', 'EnterPlanMode', 'ExitPlanMode',
+  'ToolSearch', 'Agent', 'EnterPlanMode', 'ExitPlanMode',
   'Diff', 'List', 'Show', 'Parse', 'Summarize', 'Explain',
   'Review', 'Describe', 'ReadFile', 'CheckFile', 'FindInFiles',
+  'AskUserQuestion', 'TaskOutput',
 ]);
 
 // Bash commands that are safe (read-only or non-destructive).

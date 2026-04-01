@@ -50,6 +50,10 @@ const SENSITIVE_FILE_PATTERNS = [
 
 const EXEMPT_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
+  'ToolSearch', 'Agent', 'EnterPlanMode', 'ExitPlanMode',
+  'Diff', 'List', 'Show', 'Parse', 'Summarize', 'Explain',
+  'Review', 'Describe', 'ReadFile', 'CheckFile', 'FindInFiles',
+  'AskUserQuestion', 'TaskOutput',
 ]);
 
 const ALWAYS_ESCALATE_TOOLS = new Set(/* populate as needed */ []);
