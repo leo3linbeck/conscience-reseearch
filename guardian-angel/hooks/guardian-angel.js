@@ -377,6 +377,7 @@ function buildSystem2UserMessage(promptClass) {
       ``,
       `## File Metadata`,
       `Path: ${fileMeta.path}`,
+      `File exists: ${fileMeta.file_exists}`,
       `In git repo: ${fileMeta.in_git_repo}`,
       `Git tracked: ${fileMeta.git_tracked}`,
       `Has staged changes: ${fileMeta.has_staged_changes}`,

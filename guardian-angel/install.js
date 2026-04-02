@@ -88,6 +88,7 @@ function resolveFileMetadata(toolName, toolInput) {
 
   const meta = {
     path: filePath,
+    file_exists: fs.existsSync(filePath),
     in_git_repo: false,
     git_tracked: false,
     has_staged_changes: false,
@@ -304,6 +305,7 @@ const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
       \`\`,
       \`## File Metadata\`,
       \`Path: \${fileMeta.path}\`,
+      \`File exists: \${fileMeta.file_exists}\`,
       \`In git repo: \${fileMeta.in_git_repo}\`,
       \`Git tracked: \${fileMeta.git_tracked}\`,
       \`Has staged changes: \${fileMeta.has_staged_changes}\`,
