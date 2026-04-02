@@ -101,7 +101,9 @@ if [[ -n "$RERUN_FAILURES" ]]; then
   FAILURE_SCENARIOS=($(node -e "
     const s = require('$SUMMARY_FILE');
     const failures = s.failures || [];
-    failures.forEach(f => console.log(f.scenario));
+    // Deduplicate scenario paths
+    const seen = new Set();
+    failures.forEach(f => { if (!seen.has(f.scenario)) { seen.add(f.scenario); console.log(f.scenario); } });
   "))
 
   if [[ ${#FAILURE_SCENARIOS[@]} -eq 0 ]]; then
@@ -121,6 +123,8 @@ if [[ -n "$RERUN_FAILURES" ]]; then
     fi
   fi
 
+  IFS=',' read -ra RERUN_CONDS <<< "$RERUN_CONDITIONS"
+
   echo "═══════════════════════════════════════════════════════"
   echo "  Guardian Angel Clinical Trial v3 — Rerun Failures"
   echo "  Source run: $(basename "$RERUN_FAILURES")"
@@ -132,28 +136,97 @@ if [[ -n "$RERUN_FAILURES" ]]; then
   echo "═══════════════════════════════════════════════════════"
   echo ""
 
-  for SCENARIO in "${FAILURE_SCENARIOS[@]}"; do
-    echo -e "  ${CYAN}Rerunning: $SCENARIO${NC}"
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    echo -e "${RED}ERROR: ANTHROPIC_API_KEY is not set.${NC}" >&2; exit 1
+  fi
+
+  # Build Docker images
+  echo "[1/3] Building Docker images..."
+  DOCKER_BUILDKIT=1 docker build -t guardian-angel-trial "$SCRIPT_DIR" --progress=plain 2>&1
+  echo "      ✓ guardian-angel-trial"
+  DOCKER_BUILDKIT=1 docker build -t guardian-angel-mock "$SCRIPT_DIR/mock-server" --progress=plain 2>&1
+  echo "      ✓ guardian-angel-mock"
+
+  # Set up network
+  echo "[2/3] Setting up Docker network..."
+  docker network inspect "$NETWORK" &>/dev/null || docker network create "$NETWORK"
+  echo "      ✓ Network: $NETWORK"
+
+  # Start single mock server for all failures
+  MOCK_CONTAINER="ga-mock-rerun"
+  docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
+  docker run -d --name "$MOCK_CONTAINER" --network "$NETWORK" --network-alias ga-mock-server guardian-angel-mock &>/dev/null
+  for i in $(seq 1 15); do
+    if docker exec "$MOCK_CONTAINER" wget -qO- http://127.0.0.1:9999/health 2>/dev/null | grep -q ok; then break; fi
+    sleep 1
   done
+
+  mkdir -p "$RAW_DIR"
+
+  echo "[3/3] Running ${#FAILURE_SCENARIOS[@]} failure scenarios × ${#RERUN_CONDS[@]} conditions..."
   echo ""
 
-  # Run each failure scenario via recursive call (reuses all infrastructure)
-  PASS=0; FAIL=0
-  for SCENARIO in "${FAILURE_SCENARIOS[@]}"; do
-    RERUN_ARGS=(--scenario "$SCENARIO" --sequential --wrapper "$WRAPPER_NAME" --condition "$RERUN_CONDITIONS")
-    [[ -n "$MODEL_OVERRIDE" ]] && RERUN_ARGS+=(--model "$MODEL_OVERRIDE")
+  PASS=0; FAIL=0; IDX=0
+  TOTAL=$(( ${#FAILURE_SCENARIOS[@]} * ${#RERUN_CONDS[@]} ))
 
-    if bash "$SCRIPT_DIR/run-trial.sh" "${RERUN_ARGS[@]}"; then
-      ((PASS++)) || true
-    else
-      ((FAIL++)) || true
-    fi
+  for SCENARIO in "${FAILURE_SCENARIOS[@]}"; do
+    SCENARIO_PATH="$SCRIPT_DIR/scenarios/$SCENARIO"
+    CATEGORY="${SCENARIO%%/*}"
+
+    for CONDITION in "${RERUN_CONDS[@]}"; do
+      (( IDX++ )) || true
+      echo -e "  ${CYAN}[${IDX}/${TOTAL}] ${SCENARIO} × Condition ${CONDITION}${NC}"
+
+      DOCKER_ENV=(
+        -e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+        -e "CONDITION=$CONDITION"
+        -e "SCENARIO_FILE=$SCENARIO"
+        -e "MOCK_SERVER_URL=http://$MOCK_CONTAINER:9999"
+        -e "WRAPPER_FILE=$WRAPPER_NAME"
+      )
+      [[ -n "$MODEL_OVERRIDE" ]] && DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
+
+      EXIT_CODE=0
+      docker run --rm --init --network "$NETWORK" \
+        --memory 512m --cpus 1 --pids-limit 256 \
+        "${DOCKER_ENV[@]}" \
+        -v "$SCENARIO_PATH:/scenarios/$SCENARIO:ro" \
+        -v "$RAW_DIR:/results" \
+        -v "$SCRIPT_DIR/wrappers:/wrappers:ro" \
+        -v "$RATE_LIMIT_DIR:/rate-limit" \
+        guardian-angel-trial || EXIT_CODE=$?
+
+      if [[ $EXIT_CODE -eq 0 ]]; then
+        ((PASS++)) || true
+      else
+        echo -e "  ${RED}ERROR (exit $EXIT_CODE)${NC}"
+        ((FAIL++)) || true
+      fi
+    done
   done
+
+  # Cleanup mock server
+  docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
+
+  # Collect metrics — single report
+  echo ""
+  echo "Computing metrics..."
+  RESULT_COUNT=$(find "$RAW_DIR" -name "*.json" | wc -l | tr -d ' ')
+
+  if [[ "$RESULT_COUNT" -gt 0 ]]; then
+    node "$SCRIPT_DIR/harness/collect-metrics.js" "$RUN_DIR"
+  else
+    echo -e "${YELLOW}No result files found — skipping metrics.${NC}"
+  fi
+
+  rm -rf "$RATE_LIMIT_DIR" 2>/dev/null
 
   echo ""
   echo "═══════════════════════════════════════════════════════"
   echo "  Rerun complete: $PASS passed, $FAIL failed"
-  echo "  (of ${#FAILURE_SCENARIOS[@]} failures from $(basename "$RERUN_FAILURES"))"
+  echo "  (of $TOTAL runs from ${#FAILURE_SCENARIOS[@]} failures)"
+  echo "  Results: $RUN_DIR ($RESULT_COUNT files)"
+  echo "  Report:  $RUN_DIR/report.md"
   echo "═══════════════════════════════════════════════════════"
   exit 0
 fi
