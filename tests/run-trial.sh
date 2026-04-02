@@ -36,12 +36,16 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+RATE_LIMIT_DIR="/tmp/ga-rate-limit-$$"
+mkdir -p "$RATE_LIMIT_DIR"
+
 # ── Ctrl-C cleanup ──────────────────────────────────────────────────
 cleanup_on_interrupt() {
   echo ""
   echo -e "${RED}Interrupted — stopping containers...${NC}"
   docker ps --filter "ancestor=guardian-angel-trial" -q | xargs -r docker stop -t 2 2>/dev/null
-  docker ps --filter "ancestor=guardian-angel-mock" -q | xargs -r docker stop -t 2 2>/dev/null
+  docker ps --filter "ancestor=guardian-angel-mock" -q | xargs -r docker rm -f 2>/dev/null
+  rm -rf "$RATE_LIMIT_DIR" 2>/dev/null
   kill 0 2>/dev/null || true
   echo "Done."
   exit 130
@@ -216,6 +220,7 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
       -v "$SCENARIO_PATH:/scenarios/$SCENARIO_FILTER:ro" \
       -v "$RAW_DIR:/results" \
       -v "$SCRIPT_DIR/wrappers:/wrappers:ro" \
+      -v "$RATE_LIMIT_DIR:/rate-limit" \
       guardian-angel-trial || true
   done
 
@@ -258,7 +263,7 @@ elif [[ "$PARALLEL" == "true" ]]; then
     echo -e "  ${CYAN}▶ Starting worker: $CATEGORY (${#ACTIVE_PIDS[@]}/$MAX_PARALLEL active)${NC}"
 
     bash "$SCRIPT_DIR/run-category.sh" \
-      "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" \
+      "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" "$RATE_LIMIT_DIR" \
       > "$LOG_FILE" &
 
     WORKER_PIDS+=($!)
@@ -304,7 +309,7 @@ else
     echo -e "  ${CYAN}── $CATEGORY ──${NC}"
 
     bash "$SCRIPT_DIR/run-category.sh" \
-      "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" \
+      "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" "$RATE_LIMIT_DIR" \
       || true
   done
 fi
@@ -320,6 +325,9 @@ if [[ "$RESULT_COUNT" -gt 0 ]]; then
 else
   echo -e "${YELLOW}No result files found — skipping metrics.${NC}"
 fi
+
+# Clean up rate limiter
+rm -rf "$RATE_LIMIT_DIR" 2>/dev/null
 
 echo ""
 echo "═══════════════════════════════════════════════════════"

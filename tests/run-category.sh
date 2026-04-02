@@ -25,9 +25,13 @@ NETWORK="${4:?Docker network required}"
 MODEL_OVERRIDE="${5:-}"
 CONDITION_LIST="${6:-A,B,C}"
 WRAPPER_NAME="${7:-default}"
+RATE_LIMIT_DIR="${8:-/tmp/ga-rate-limit}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCK_CONTAINER="ga-mock-${CATEGORY_DIR}"
+
+# Ensure shared rate-limit directory exists on host
+mkdir -p "$RATE_LIMIT_DIR"
 
 IFS=',' read -ra CONDITIONS <<< "$CONDITION_LIST"
 
@@ -126,6 +130,7 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
       -v "$SCENARIO_PATH:/scenarios/$REL:ro" \
       -v "$RAW_DIR:/results" \
       -v "$SCRIPT_DIR/wrappers:/wrappers:ro" \
+      -v "$RATE_LIMIT_DIR:/rate-limit" \
       guardian-angel-trial || EXIT_CODE=$?
 
     ELAPSED=$(( SECONDS - START_TIME ))

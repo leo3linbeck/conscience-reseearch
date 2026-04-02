@@ -14,6 +14,7 @@
 const fs   = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { withRateLimit } = require('./rate-limiter');
 
 const DEFAULT_MODEL   = 'claude-haiku-4-5-20251001';
 const API_TIMEOUT     = 12_000;
@@ -306,29 +307,28 @@ User's instruction: "${userPrompt}"`;
 
   userMessage += '\nPerform your two-step analysis (compile, then evaluate) and return your JSON decision.';
 
-  // ── API call ─────────────────────────────────────────────────────
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
-
+  // ── API call (rate-limited) ──────────────────────────────────────
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 1024,
-        temperature: 0,
-        system: wrapperText,
-        messages: [{ role: 'user', content: userMessage }],
-      }),
-      signal: controller.signal,
+    const response = await withRateLimit(() => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
+      return fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          temperature: 0,
+          system: wrapperText,
+          messages: [{ role: 'user', content: userMessage }],
+        }),
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeout));
     });
-
-    clearTimeout(timeout);
 
     if (!response.ok) {
       return { blocked: true, decision: 'ESCALATE', reason: `API error: ${response.status}`, raw: null };

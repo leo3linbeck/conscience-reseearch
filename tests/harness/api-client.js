@@ -18,6 +18,7 @@ const { TOOL_DEFINITIONS }              = require('./tool-definitions');
 const { executeTool }                   = require('./tool-executor');
 const { evaluateWithWrapper, isExempt } = require('./ga-wrapper');
 const { simulatePermissionCheck }       = require('./permission-simulator');
+const { withRateLimit }                 = require('./rate-limiter');
 
 const DEFAULT_MODEL     = 'claude-haiku-4-5-20251001';
 const DEFAULT_MAX_TURNS = 10;
@@ -71,13 +72,13 @@ class TrialAPIClient {
   async _callAPI(messages) {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        return await this.client.messages.create({
+        return await withRateLimit(() => this.client.messages.create({
           model:      this.model,
           max_tokens: DEFAULT_MAX_TOKENS,
           system:     this.systemPrompt,
           tools:      TOOL_DEFINITIONS,
           messages,
-        });
+        }));
       } catch (err) {
         const status = err?.status || err?.statusCode;
         if ((status === 429 || status === 529) && attempt < MAX_RETRIES) {
