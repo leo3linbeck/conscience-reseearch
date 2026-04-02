@@ -64,6 +64,7 @@ MAX_PARALLEL=0
 OPTIMIZE=false
 MAX_ITER=10
 RERUN_FAILURES=""
+AB_TEST=false
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -78,6 +79,7 @@ while [[ "$#" -gt 0 ]]; do
     --optimize)      OPTIMIZE=true;        shift ;;
     --max-iter)      MAX_ITER="$2";         shift 2 ;;
     --rerun-failures) RERUN_FAILURES="$2"; shift 2 ;;
+    --ab-test)       AB_TEST=true;        shift ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -107,11 +109,25 @@ if [[ -n "$RERUN_FAILURES" ]]; then
     exit 0
   fi
 
+  # Determine conditions for rerun
+  RERUN_CONDITIONS="A,B,C"
+  if [[ "$AB_TEST" == "true" ]]; then
+    RERUN_CONDITIONS="A,B,C,D"
+  fi
+  if [[ -n "$CONDITION_FILTER" ]]; then
+    RERUN_CONDITIONS="$CONDITION_FILTER"
+    if [[ "$AB_TEST" == "true" && ! "$CONDITION_FILTER" == *"D"* ]]; then
+      RERUN_CONDITIONS="${CONDITION_FILTER},D"
+    fi
+  fi
+
   echo "═══════════════════════════════════════════════════════"
   echo "  Guardian Angel Clinical Trial v3 — Rerun Failures"
   echo "  Source run: $(basename "$RERUN_FAILURES")"
   echo "  Failures to rerun: ${#FAILURE_SCENARIOS[@]}"
-  echo "  Wrapper: $WRAPPER_NAME"
+  echo "  Conditions: $RERUN_CONDITIONS"
+  echo "  Wrapper C: $WRAPPER_NAME"
+  [[ "$AB_TEST" == "true" ]] && echo "  Wrapper D: alternative"
   [[ -n "$MODEL_OVERRIDE" ]] && echo "  Model: $MODEL_OVERRIDE"
   echo "═══════════════════════════════════════════════════════"
   echo ""
@@ -124,9 +140,8 @@ if [[ -n "$RERUN_FAILURES" ]]; then
   # Run each failure scenario via recursive call (reuses all infrastructure)
   PASS=0; FAIL=0
   for SCENARIO in "${FAILURE_SCENARIOS[@]}"; do
-    RERUN_ARGS=(--scenario "$SCENARIO" --sequential --wrapper "$WRAPPER_NAME")
+    RERUN_ARGS=(--scenario "$SCENARIO" --sequential --wrapper "$WRAPPER_NAME" --condition "$RERUN_CONDITIONS")
     [[ -n "$MODEL_OVERRIDE" ]] && RERUN_ARGS+=(--model "$MODEL_OVERRIDE")
-    [[ -n "$CONDITION_FILTER" ]] && RERUN_ARGS+=(--condition "$CONDITION_FILTER")
 
     if bash "$SCRIPT_DIR/run-trial.sh" "${RERUN_ARGS[@]}"; then
       ((PASS++)) || true

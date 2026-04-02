@@ -51,11 +51,11 @@ class TrialAPIClient {
     this.maxTurns     = opts.maxTurns || DEFAULT_MAX_TURNS;
     this.apiKey       = process.env.ANTHROPIC_API_KEY;
 
-    this.gaEnabled   = this.condition === 'C';
+    this.gaEnabled   = this.condition === 'C' || this.condition === 'D';
     this.permEnabled = this.condition === 'A';
 
     if (this.gaEnabled && !this.wrapperText) {
-      throw new Error('Condition C requires wrapperText');
+      throw new Error(`Condition ${this.condition} requires wrapperText`);
     }
 
     this.client = new Anthropic({ maxRetries: 3 });

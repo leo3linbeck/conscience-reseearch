@@ -171,10 +171,12 @@ function classifyCondition(conditionKey) {
 const hasA = Object.values(scenarioMap).some(s => s['A']);
 const hasB = Object.values(scenarioMap).some(s => s['B']);
 const hasC = Object.values(scenarioMap).some(s => s['C']);
+const hasD = Object.values(scenarioMap).some(s => s['D']);
 
 const metricsA = hasA ? classifyCondition('A') : null;
 const metricsB = hasB ? classifyCondition('B') : null;
 const metricsC = hasC ? classifyCondition('C') : null;
+const metricsD = hasD ? classifyCondition('D') : null;
 
 // ── Build report ─────────────────────────────────────────────────────
 const lines = [];
@@ -202,7 +204,8 @@ lines.push('| Condition | Description | Purpose |');
 lines.push('|-----------|-------------|---------|');
 lines.push('| A | Claude guardrails (permission system, no GA) | Measures Claude\'s built-in safety |');
 lines.push('| B | No guardrails | Diagnostic — did the model itself resist? |');
-lines.push('| C | GA wrapper (no permission system) | Measures Guardian Angel\'s effectiveness |');
+lines.push('| C | GA wrapper with default.txt | Measures Guardian Angel (default prompt) |');
+if (hasD) lines.push('| D | GA wrapper with alternative.txt | Measures Guardian Angel (alternative prompt) |');
 lines.push('');
 
 lines.push('## Classification (Standard Screening Convention)');
@@ -224,7 +227,8 @@ lines.push('');
 const condColumns = [];
 if (metricsA) condColumns.push({ key: 'A', label: 'Claude (A)', m: metricsA });
 if (metricsB) condColumns.push({ key: 'B', label: 'No guardrails (B)', m: metricsB });
-if (metricsC) condColumns.push({ key: 'C', label: 'Guardian Angel (C)', m: metricsC });
+if (metricsC) condColumns.push({ key: 'C', label: 'GA default (C)', m: metricsC });
+if (metricsD) condColumns.push({ key: 'D', label: 'GA alternative (D)', m: metricsD });
 
 const colHeaders = condColumns.map(c => c.label).join(' | ');
 const colDashes  = condColumns.map(() => '---').join(' | ');
@@ -335,18 +339,21 @@ for (const scenario of allScenarios) {
 }
 lines.push('');
 
-// ── Failures section (for optimization — GA failures only) ───────────
-const gaFailures = metricsC?.failures || [];
-if (gaFailures.length > 0) {
-  lines.push('## GA Failures (for optimization)');
+// ── Failures section ─────────────────────────────────────────────────
+function reportFailures(label, condKey, metrics) {
+  if (!metrics) return;
+  const failures = metrics.failures || [];
+  if (failures.length === 0) return;
+
+  lines.push(`## ${label} Failures (for optimization)`);
   lines.push('');
-  for (const f of gaFailures) {
-    const cResult = scenarioMap[f.scenario]?.['C'];
+  for (const f of failures) {
+    const result = scenarioMap[f.scenario]?.[condKey];
     lines.push(`### ${f.scenario} — ${f.cls}`);
     lines.push(`- **Category**: ${f.category}`);
     lines.push(`- **Detail**: ${f.detail}`);
-    if (cResult) {
-      const gaAttempt = (cResult.tool_attempts || []).find(a => a.ga_decision);
+    if (result) {
+      const gaAttempt = (result.tool_attempts || []).find(a => a.ga_decision);
       if (gaAttempt) {
         lines.push(`- **GA Decision**: ${gaAttempt.ga_decision}`);
         lines.push(`- **GA Reason**: ${(gaAttempt.ga_reason || '').slice(0, 300)}`);
@@ -355,6 +362,15 @@ if (gaFailures.length > 0) {
     lines.push('');
   }
 }
+
+reportFailures('GA Default (C)', 'C', metricsC);
+reportFailures('GA Alternative (D)', 'D', metricsD);
+
+// Combine all failures for summary.json
+const allFailures = [
+  ...(metricsC?.failures || []).map(f => ({ ...f, condition: 'C' })),
+  ...(metricsD?.failures || []).map(f => ({ ...f, condition: 'D' })),
+];
 
 const report = lines.join('\n');
 fs.writeFileSync(path.join(runDir, 'report.md'), report);
@@ -370,11 +386,13 @@ const summary = {
   condition_A: metricsA ? { counts: metricsA.counts, metrics: metricsA.metrics, by_category: metricsA.byCategory } : null,
   condition_B: metricsB ? { counts: metricsB.counts, metrics: metricsB.metrics, by_category: metricsB.byCategory } : null,
   condition_C: metricsC ? { counts: metricsC.counts, metrics: metricsC.metrics, by_category: metricsC.byCategory } : null,
-  failures:    gaFailures.map(f => ({
+  condition_D: metricsD ? { counts: metricsD.counts, metrics: metricsD.metrics, by_category: metricsD.byCategory } : null,
+  failures:    allFailures.map(f => ({
     scenario: f.scenario,
     category: f.category,
     cls:      f.cls,
     detail:   f.detail,
+    condition: f.condition,
   })),
 };
 fs.writeFileSync(path.join(runDir, 'summary.json'), JSON.stringify(summary, null, 2));

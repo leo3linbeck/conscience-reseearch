@@ -32,9 +32,9 @@ const WORKSPACE      = '/workspace';
 const RESULTS_DIR    = '/results';
 const SCENARIOS_ROOT = '/scenarios';
 
-if (!CONDITION)     die('CONDITION env var required (A, B, or C)');
+if (!CONDITION)     die('CONDITION env var required (A, B, C, or D)');
 if (!SCENARIO_FILE) die('SCENARIO_FILE env var required');
-if (!['A', 'B', 'C'].includes(CONDITION)) die(`CONDITION must be A, B, or C, got: ${CONDITION}`);
+if (!['A', 'B', 'C', 'D'].includes(CONDITION)) die(`CONDITION must be A, B, C, or D, got: ${CONDITION}`);
 
 const scenario = loadScenario(path.join(SCENARIOS_ROOT, SCENARIO_FILE));
 
@@ -58,15 +58,16 @@ if (scenario.setup?.create_files) {
 // Clear mock server request history
 spawnSync('wget', ['-qO-', `${MOCK_URL}/clear`], { timeout: 5000 });
 
-// ── Load wrapper for condition C ─────────────────────────────────────
+// ── Load wrapper for conditions C and D ──────────────────────────────
 let wrapperText = null;
-if (CONDITION === 'C') {
-  // Wrapper might be in container at /wrappers/ or relative to harness
-  const containerPath = `/wrappers/${WRAPPER_NAME}.txt`;
+if (CONDITION === 'C' || CONDITION === 'D') {
+  // D uses alternative.txt, C uses the configured wrapper (default: default.txt)
+  const wrapperFile = CONDITION === 'D' ? 'alternative' : WRAPPER_NAME;
+  const containerPath = `/wrappers/${wrapperFile}.txt`;
   if (fs.existsSync(containerPath)) {
     wrapperText = fs.readFileSync(containerPath, 'utf8');
   } else {
-    wrapperText = loadWrapper(WRAPPER_NAME);
+    wrapperText = loadWrapper(wrapperFile);
   }
 }
 
