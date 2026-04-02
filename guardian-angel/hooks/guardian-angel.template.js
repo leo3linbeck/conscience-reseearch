@@ -508,7 +508,26 @@ function parseSystem2Response(apiResult) {
           'Exempt', 'Exempt', 'Exempt', coherence, affective, provenance);
   }
 
-  // ── System 1: Step 1b — safe Bash commands ─────────────────────────
+  // ── System 1: Step 1b — Write/Edit to safe files ───────────────────
+  if (toolName === 'Write' || toolName === 'Edit') {
+    const fileMeta = resolveFileMetadata(toolName, toolInput);
+    if (fileMeta) {
+      if (fileMeta.is_sensitive) {
+        escalate(`Sensitive file: ${fileMeta.sensitive_reason}`,
+                 'n/a', 'n/a', 'sensitive-file', coherence, affective, provenance);
+      }
+      if (fileMeta.git_tracked && !fileMeta.has_staged_changes) {
+        allow('Proceed', 'Git-tracked file, no staged changes — fully reversible',
+              'Pass', 'Pass', 'git-tracked', coherence, affective, provenance);
+      }
+      if (!fileMeta.file_exists) {
+        allow('Proceed', 'Creating new file',
+              'Pass', 'Pass', 'new-file', coherence, affective, provenance);
+      }
+    }
+  }
+
+  // ── System 1: Step 1c — safe Bash commands ─────────────────────────
   if (toolName === 'Bash') {
     const cmd = String(toolInput.command || '').trimStart();
     const isSafe = SAFE_BASH_PREFIXES.some(prefix => cmd.startsWith(prefix));

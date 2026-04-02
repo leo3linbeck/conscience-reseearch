@@ -13,7 +13,6 @@
  * What gets installed:
  *   ~/.claude/hooks/guardian-angel.js        — the hook (System 1 + System 2)
  *   ~/.claude/hooks/ga-system2-prompt.txt    — the evaluation prompt (Phase 2)
- *   ~/.claude/hooks/ga-compile-prompt.txt    — the compilation prompt (Phase 1)
  *   ~/.claude/hooks/ga-lib/                  — shared modules
  *     file-metadata.js                       — git status, sensitive patterns
  *     file-resolver.js                       — reads scripts for DAG flattening
@@ -39,12 +38,12 @@ const SHOW_DIFF = process.argv.includes('--diff');
 
 // ── Source paths ─────────────────────────────────────────────────────
 const WRAPPER_SRC  = path.join(REPO_ROOT, 'tests', 'wrappers', 'default.txt');
-const COMPILE_SRC  = path.join(REPO_ROOT, 'tests', 'wrappers', 'compile.txt');
+// compile.txt removed — single-prompt approach now
 const GA_WRAPPER_SRC = path.join(REPO_ROOT, 'tests', 'harness', 'ga-wrapper.js');
 
 // ── Destination paths ────────────────────────────────────────────────
 const WRAPPER_DST  = path.join(HOOKS_DIR, 'ga-system2-prompt.txt');
-const COMPILE_DST  = path.join(HOOKS_DIR, 'ga-compile-prompt.txt');
+// compile prompt removed — single-prompt approach now
 const HOOK_DST     = path.join(HOOKS_DIR, 'guardian-angel.js');
 const REPO_HOOK    = path.join(__dirname, 'hooks', 'guardian-angel.js');
 
@@ -392,7 +391,6 @@ function install() {
 
   const files = [
     { dst: WRAPPER_DST, content: fs.readFileSync(WRAPPER_SRC, 'utf8'), label: 'Evaluation prompt' },
-    { dst: COMPILE_DST, content: fs.readFileSync(COMPILE_SRC, 'utf8'), label: 'Compilation prompt' },
     { dst: path.join(GA_LIB_DIR, 'file-metadata.js'), content: buildFileMetadata(), label: 'File metadata module' },
     { dst: path.join(GA_LIB_DIR, 'file-resolver.js'), content: buildFileResolver(), label: 'File resolver module' },
     { dst: HOOK_DST, content: buildProductionHook(), label: 'Hook script' },

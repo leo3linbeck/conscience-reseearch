@@ -98,6 +98,22 @@ function checkSystem1(toolName, toolInput) {
     return { blocked: true, decision: 'ESCALATE', reason: `Tool '${toolName}' requires user approval`, raw: null };
   }
 
+  // Write/Edit to git-tracked files with no staged changes — safe, fully reversible
+  if (toolName === 'Write' || toolName === 'Edit') {
+    const fileMeta = resolveFileMetadata(toolName, toolInput);
+    if (fileMeta) {
+      if (fileMeta.is_sensitive) {
+        return { blocked: true, decision: 'ESCALATE', reason: `Sensitive file: ${fileMeta.sensitive_reason}`, raw: null };
+      }
+      if (fileMeta.git_tracked && !fileMeta.has_staged_changes) {
+        return { blocked: false, decision: 'PROCEED', reason: 'Git-tracked file, no staged changes — fully reversible', raw: null };
+      }
+      if (!fileMeta.file_exists) {
+        return { blocked: false, decision: 'PROCEED', reason: 'Creating new file', raw: null };
+      }
+    }
+  }
+
   if (toolName === 'Bash') {
     const cmd = toolInput.command || '';
     for (const pattern of DESTRUCTIVE_BASH_PATTERNS) {
