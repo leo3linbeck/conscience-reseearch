@@ -63,6 +63,7 @@ PARALLEL=true
 MAX_PARALLEL=0
 OPTIMIZE=false
 MAX_ITER=10
+RERUN_FAILURES=""
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -76,9 +77,71 @@ while [[ "$#" -gt 0 ]]; do
     --max-parallel)  MAX_PARALLEL="$2";     shift 2 ;;
     --optimize)      OPTIMIZE=true;        shift ;;
     --max-iter)      MAX_ITER="$2";         shift 2 ;;
+    --rerun-failures) RERUN_FAILURES="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+
+# ── Rerun-failures mode ───────────────────────────────────────────────
+if [[ -n "$RERUN_FAILURES" ]]; then
+  # Resolve to absolute path
+  if [[ ! "$RERUN_FAILURES" = /* ]]; then
+    RERUN_FAILURES="$SCRIPT_DIR/results/$RERUN_FAILURES"
+  fi
+  SUMMARY_FILE="$RERUN_FAILURES/summary.json"
+  if [[ ! -f "$SUMMARY_FILE" ]]; then
+    echo -e "${RED}ERROR: summary.json not found in $RERUN_FAILURES${NC}" >&2
+    echo "  Expected: $SUMMARY_FILE" >&2
+    exit 1
+  fi
+
+  # Extract failure scenario files from summary.json
+  FAILURE_SCENARIOS=($(node -e "
+    const s = require('$SUMMARY_FILE');
+    const failures = s.failures || [];
+    failures.forEach(f => console.log(f.scenario));
+  "))
+
+  if [[ ${#FAILURE_SCENARIOS[@]} -eq 0 ]]; then
+    echo -e "${GREEN}No failures found in $RERUN_FAILURES — nothing to rerun.${NC}"
+    exit 0
+  fi
+
+  echo "═══════════════════════════════════════════════════════"
+  echo "  Guardian Angel Clinical Trial v3 — Rerun Failures"
+  echo "  Source run: $(basename "$RERUN_FAILURES")"
+  echo "  Failures to rerun: ${#FAILURE_SCENARIOS[@]}"
+  echo "  Wrapper: $WRAPPER_NAME"
+  [[ -n "$MODEL_OVERRIDE" ]] && echo "  Model: $MODEL_OVERRIDE"
+  echo "═══════════════════════════════════════════════════════"
+  echo ""
+
+  for SCENARIO in "${FAILURE_SCENARIOS[@]}"; do
+    echo -e "  ${CYAN}Rerunning: $SCENARIO${NC}"
+  done
+  echo ""
+
+  # Run each failure scenario via recursive call (reuses all infrastructure)
+  PASS=0; FAIL=0
+  for SCENARIO in "${FAILURE_SCENARIOS[@]}"; do
+    RERUN_ARGS=(--scenario "$SCENARIO" --sequential --wrapper "$WRAPPER_NAME")
+    [[ -n "$MODEL_OVERRIDE" ]] && RERUN_ARGS+=(--model "$MODEL_OVERRIDE")
+    [[ -n "$CONDITION_FILTER" ]] && RERUN_ARGS+=(--condition "$CONDITION_FILTER")
+
+    if bash "$SCRIPT_DIR/run-trial.sh" "${RERUN_ARGS[@]}"; then
+      ((PASS++)) || true
+    else
+      ((FAIL++)) || true
+    fi
+  done
+
+  echo ""
+  echo "═══════════════════════════════════════════════════════"
+  echo "  Rerun complete: $PASS passed, $FAIL failed"
+  echo "  (of ${#FAILURE_SCENARIOS[@]} failures from $(basename "$RERUN_FAILURES"))"
+  echo "═══════════════════════════════════════════════════════"
+  exit 0
+fi
 
 # ── Determine scenario directories ──────────────────────────────────
 if [[ "$USE_V2" == "true" ]]; then
@@ -135,6 +198,7 @@ echo "  Wrapper: $WRAPPER_NAME"
 [[ -n "$CONDITION_FILTER" ]] && echo "  Condition: $CONDITION_FILTER"
 [[ -n "$SCENARIO_FILTER" ]] && echo "  Scenario: $SCENARIO_FILTER"
 [[ "$OPTIMIZE" == "true" ]] && echo "  Optimization: enabled (max $MAX_ITER iterations)"
+[[ -n "$RERUN_FAILURES" ]] && echo "  Rerun failures from: $(basename "$RERUN_FAILURES")"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 
