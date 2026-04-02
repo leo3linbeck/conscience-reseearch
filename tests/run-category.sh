@@ -126,6 +126,9 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
     EXIT_CODE=0
     docker run --rm --init \
       --network "$NETWORK" \
+      --memory 512m \
+      --cpus 1 \
+      --pids-limit 256 \
       "${DOCKER_ENV[@]}" \
       -v "$SCENARIO_PATH:/scenarios/$REL:ro" \
       -v "$RAW_DIR:/results" \

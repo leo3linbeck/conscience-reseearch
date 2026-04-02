@@ -216,7 +216,9 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
     )
     [[ -n "$MODEL_OVERRIDE" ]] && DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
 
-    docker run --rm --init --network "$NETWORK" "${DOCKER_ENV[@]}" \
+    docker run --rm --init --network "$NETWORK" \
+      --memory 512m --cpus 1 --pids-limit 256 \
+      "${DOCKER_ENV[@]}" \
       -v "$SCENARIO_PATH:/scenarios/$SCENARIO_FILTER:ro" \
       -v "$RAW_DIR:/results" \
       -v "$SCRIPT_DIR/wrappers:/wrappers:ro" \
