@@ -221,34 +221,55 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
 
   docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
 
-# ── Parallel mode ─────────────────────────────────────────────────────
+# ── Parallel mode (max 6 concurrent workers) ─────────────────────────
 elif [[ "$PARALLEL" == "true" ]]; then
+  DEFAULT_MAX_PARALLEL=6
+  [[ $MAX_PARALLEL -eq 0 ]] && MAX_PARALLEL=$DEFAULT_MAX_PARALLEL
+
   WORKER_PIDS=()
+  WORKER_CATS=()
   WORKER_LOGS=()
+  ACTIVE_PIDS=()
+
+  echo -e "  ${CYAN}Max parallel workers: $MAX_PARALLEL${NC}"
+  echo ""
 
   for i in "${!SCENARIO_DIRS[@]}"; do
     CATEGORY="${SCENARIO_DIRS[$i]}"
     MOCK_PORT=$((10000 + i))
     LOG_FILE="$RUN_DIR/${CATEGORY}.log"
     WORKER_LOGS+=("$LOG_FILE")
+    WORKER_CATS+=("$CATEGORY")
 
-    echo -e "  ${CYAN}▶ Starting worker: $CATEGORY${NC}"
+    # Wait for a slot if at capacity
+    while (( ${#ACTIVE_PIDS[@]} >= MAX_PARALLEL )); do
+      # Wait for any one child to finish
+      wait -n "${ACTIVE_PIDS[@]}" 2>/dev/null || true
+      # Rebuild active list (remove finished PIDs)
+      NEW_ACTIVE=()
+      for PID in "${ACTIVE_PIDS[@]}"; do
+        if kill -0 "$PID" 2>/dev/null; then
+          NEW_ACTIVE+=("$PID")
+        fi
+      done
+      ACTIVE_PIDS=("${NEW_ACTIVE[@]}")
+    done
+
+    echo -e "  ${CYAN}▶ Starting worker: $CATEGORY (${#ACTIVE_PIDS[@]}/$MAX_PARALLEL active)${NC}"
 
     bash "$SCRIPT_DIR/run-category.sh" \
       "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" \
       > "$LOG_FILE" &
 
     WORKER_PIDS+=($!)
-
-    if [[ $MAX_PARALLEL -gt 0 ]] && (( ${#WORKER_PIDS[@]} >= MAX_PARALLEL )); then
-      wait -n "${WORKER_PIDS[@]}" 2>/dev/null || true
-    fi
+    ACTIVE_PIDS+=($!)
   done
 
   echo ""
-  echo -e "  ${CYAN}Workers running...${NC}"
+  echo -e "  ${CYAN}All workers launched. Waiting for completion...${NC}"
   echo ""
 
+  # Wait for all workers to finish
   for PID in "${WORKER_PIDS[@]}"; do
     wait "$PID" 2>/dev/null || true
   done
@@ -256,8 +277,8 @@ elif [[ "$PARALLEL" == "true" ]]; then
   echo ""
 
   WORKER_FAILURES=0
-  for i in "${!SCENARIO_DIRS[@]}"; do
-    CATEGORY="${SCENARIO_DIRS[$i]}"
+  for i in "${!WORKER_CATS[@]}"; do
+    CATEGORY="${WORKER_CATS[$i]}"
     EXIT_FILE="$RUN_DIR/.exit-${CATEGORY}"
     if [[ -f "$EXIT_FILE" ]]; then
       EC=$(cat "$EXIT_FILE")
