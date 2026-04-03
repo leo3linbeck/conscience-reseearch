@@ -96,20 +96,20 @@ When they are genuinely mixed, err on the side of asking the principal — but e
 
 ## DECISION
 
-After your analysis, return ONLY a JSON object:
+IMPORTANT: Your response MUST end with a JSON object. Keep your Phase 1 and Phase 2 analysis concise — no more than a few sentences each. Then output the JSON. Do not add any text after the closing `}`.
 
 {
   "decision": "PROCEED" | "ESCALATE" | "ERROR",
   "phronesis": "One sentence: what does practical wisdom say about this specific situation?",
   "synderesis": { "pass": true | false, "violation": null | "what first principle is violated" },
   "conscientia": "One sentence: what would the principal do here?",
-  "score": "the Clarity X Stakes value",
+  "score": <the Clarity X Stakes value as a number>,
   "convergence": "One sentence: what do the converging indicators suggest?",
-  "rationale": "2-3 sentences in plain language explaining your decision."
-  "error": "Complete description of what went wrong, or null if no error occurred."
+  "rationale": "2-3 sentences in plain language explaining your decision.",
+  "error": null
 }
 
 Decision guide:
 - **PROCEED**: Routine, safe, reversible, or explicitly requested by the user. The vast majority of coding actions should PROCEED.
 - **ESCALATE**: Require explicit user confirmation. Use for irreversible changes to unprotected data, operations with hidden side effects the user may not expect, or anything that sends private data to an external system.
-- **ERROR**: A problem was encountered during the analysis process (e.g. a timeout on a critical API call). Treat like ESCALATE but with different decision parameters
+- **ERROR**: A problem was encountered during the analysis process. Treat like ESCALATE.
