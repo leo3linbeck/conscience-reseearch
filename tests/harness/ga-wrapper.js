@@ -21,6 +21,30 @@ const API_TIMEOUT     = 12_000;
 const MAX_FILE_SIZE   = 10_000;
 const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
 
+// ── LLM Backend Configuration ────────────────────────────────────────
+// GA can use any OpenAI-compatible API. Configure via environment:
+//   GA_API_BASE    — API base URL (default: Anthropic)
+//   GA_API_KEY     — API key (default: ANTHROPIC_API_KEY)
+//   GA_MODEL       — Model ID
+//   GA_API_FORMAT  — 'anthropic' or 'openai' (default: auto-detect from URL)
+//
+// Examples:
+//   Anthropic:  GA_API_BASE=https://api.anthropic.com  GA_MODEL=claude-haiku-4-5-20251001
+//   OpenAI:     GA_API_BASE=https://api.openai.com     GA_MODEL=gpt-4o-mini
+//   Ollama:     GA_API_BASE=http://localhost:11434      GA_MODEL=llama3
+//   Together:   GA_API_BASE=https://api.together.xyz    GA_MODEL=meta-llama/Llama-3-8b-chat-hf
+
+const GA_API_BASE = process.env.GA_API_BASE || 'https://api.anthropic.com';
+
+function detectApiFormat() {
+  const explicit = process.env.GA_API_FORMAT;
+  if (explicit) return explicit;
+  if (GA_API_BASE.includes('anthropic.com')) return 'anthropic';
+  return 'openai';
+}
+
+const GA_API_FORMAT = detectApiFormat();
+
 // ── Sensitive file patterns ──────────────────────────────────────────
 const SENSITIVE_FILE_PATTERNS = [
   /\.env$/i,
@@ -256,6 +280,107 @@ function readFileSafe(filePath) {
   } catch { return null; }
 }
 
+// ── LLM API call (pluggable backend) ─────────────────────────────────
+
+/**
+ * Call an LLM with system prompt + user message.
+ * Supports Anthropic and OpenAI-compatible APIs.
+ *
+ * @param {string} systemPrompt
+ * @param {string} userMessage
+ * @param {string} model
+ * @param {string} apiKey
+ * @returns {Promise<string>} The raw text response
+ */
+async function callLLM(systemPrompt, userMessage, model, apiKey) {
+  const gaApiKey = process.env.GA_API_KEY || apiKey;
+
+  if (GA_API_FORMAT === 'anthropic') {
+    return callAnthropic(systemPrompt, userMessage, model, gaApiKey);
+  } else {
+    return callOpenAI(systemPrompt, userMessage, model, gaApiKey);
+  }
+}
+
+async function callAnthropic(systemPrompt, userMessage, model, apiKey) {
+  return withRateLimit(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
+    try {
+      const response = await fetch(`${GA_API_BASE}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          temperature: 0,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userMessage }],
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const result = await response.json();
+      return result.content[0].text;
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+}
+
+async function callOpenAI(systemPrompt, userMessage, model, apiKey) {
+  // OpenAI-compatible: works with OpenAI, Ollama, Together, vLLM, etc.
+  const baseUrl = GA_API_BASE.replace(/\/+$/, '');
+  // Ollama uses /api/chat, others use /v1/chat/completions
+  const isOllama = baseUrl.includes('11434') || baseUrl.includes('ollama');
+  const endpoint = isOllama
+    ? `${baseUrl}/api/chat`
+    : `${baseUrl}/v1/chat/completions`;
+
+  return withRateLimit(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+      const body = {
+        model,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage },
+        ],
+      };
+      // Ollama doesn't use max_tokens; OpenAI-compatible uses max_tokens
+      if (!isOllama) body.max_tokens = 1024;
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const result = await response.json();
+
+      // Ollama format: { message: { content: "..." } }
+      // OpenAI format: { choices: [{ message: { content: "..." } }] }
+      if (result.message?.content) return result.message.content;
+      if (result.choices?.[0]?.message?.content) return result.choices[0].message.content;
+      throw new Error('Unexpected response format');
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+}
+
 // ── System 2: Single-call evaluation ─────────────────────────────────
 
 /**
@@ -325,33 +450,8 @@ User's instruction: "${userPrompt}"`;
 
   // ── API call (rate-limited) ──────────────────────────────────────
   try {
-    const response = await withRateLimit(() => {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
-      return fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: 1024,
-          temperature: 0,
-          system: wrapperText,
-          messages: [{ role: 'user', content: userMessage }],
-        }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeout));
-    });
-
-    if (!response.ok) {
-      return { blocked: true, decision: 'ESCALATE', reason: `API error: ${response.status}`, raw: null };
-    }
-
-    const result = await response.json();
-    return parseResponse(result);
+    const text = await callLLM(wrapperText, userMessage, model, apiKey);
+    return parseResponseText(text);
   } catch (err) {
     return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null };
   }
@@ -396,32 +496,38 @@ function extractJSON(text) {
   return null;
 }
 
-function parseResponse(apiResult) {
+/**
+ * Parse raw LLM text response into a structured result.
+ */
+function parseResponseText(text) {
   try {
-    const text = apiResult.content[0].text;
-    // The response may contain chain-of-thought before/after the JSON.
-    // Find the JSON object containing "decision" key.
     const parsed = extractJSON(text);
     if (!parsed) {
       return { blocked: true, decision: 'ESCALATE', reason: `no valid JSON found in response`, raw: null };
     }
 
-    const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK']);
+    const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK', 'ERROR']);
     if (!validDecisions.has(parsed.decision)) {
       return { blocked: true, decision: 'ESCALATE', reason: `invalid decision: ${parsed.decision}`, raw: parsed };
     }
 
-    const blocked = parsed.decision === 'BLOCK' || parsed.decision === 'ESCALATE' || parsed.decision === 'PAUSE';
+    const blocked = parsed.decision === 'BLOCK' || parsed.decision === 'ESCALATE' || parsed.decision === 'PAUSE' || parsed.decision === 'ERROR';
 
     return {
       blocked,
       decision: parsed.decision,
-      reason: parsed.rationale || parsed.convergence_summary || 'no rationale',
+      reason: parsed.rationale || parsed.convergence || parsed.convergence_summary || 'no rationale',
       raw: parsed,
     };
   } catch (err) {
     return { blocked: true, decision: 'ESCALATE', reason: `parse error: ${err.message}`, raw: null };
   }
+}
+
+// Legacy wrapper for code that passes apiResult directly
+function parseResponse(apiResult) {
+  const text = apiResult.content?.[0]?.text || '';
+  return parseResponseText(text);
 }
 
 // ── Exports ──────────────────────────────────────────────────────────
@@ -432,8 +538,10 @@ function isExempt(toolName) {
 
 module.exports = {
   evaluateWithWrapper,
+  callLLM,
   loadWrapper,
   parseResponse,
+  parseResponseText,
   isExempt,
   checkSystem1,
   resolveReferencedFiles,
