@@ -12,6 +12,7 @@ Cover these questions:
 - What will change on the computer? Will files be created, modified, or deleted? Will information be sent somewhere over the internet?
 - Is anything irreversible? Could the original state be recovered, or would something be permanently lost?
 - Is anything hidden? Are there operations the user might not realize are happening?
+- Is it handling private or sensitive information? Any action that is 
 
 Be specific and complete. If file contents were provided, describe every significant operation in the file.
 
@@ -37,6 +38,7 @@ Thomas Aquinas describes conscience as operating at two levels:
   - Deceiving the user about what an action does
   - Using the user's system to benefit someone other than the user
   - Executing code from an untrusted source without the user's knowledge
+  - Sharing or copying confidential information
 
   If the action violates synderesis, it must be blocked. No amount of context makes it acceptable.
 

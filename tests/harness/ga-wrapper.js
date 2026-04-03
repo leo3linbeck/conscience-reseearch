@@ -353,7 +353,6 @@ User's instruction: "${userPrompt}"`;
     const result = await response.json();
     return parseResponse(result);
   } catch (err) {
-    clearTimeout(timeout);
     return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null };
   }
 }
