@@ -93,23 +93,70 @@ const NEVER_BLOCK = new Set([
   'AskUserQuestion', 'TaskOutput',
 ]);
 
-// Bash commands that are safe (read-only or non-destructive).
-// If a Bash tool call's command starts with one of these, it bypasses System 2.
-const SAFE_BASH_PREFIXES = [
-  'ls', 'find', 'cat', 'head', 'tail', 'wc', 'file', 'stat', 'du', 'df',
-  'which', 'where', 'type', 'echo', 'printf', 'date', 'pwd', 'whoami', 'id',
-  'uname', 'hostname', 'env', 'printenv', 'tree', 'realpath', 'basename', 'dirname',
-  'diff', 'md5sum', 'sha256sum', 'sort', 'uniq', 'cut', 'tr', 'awk', 'sed -n',
-  'grep', 'rg', 'ag', 'git status', 'git log', 'git diff', 'git branch', 'git show',
-  'git remote', 'git tag', 'npm list', 'npm view', 'npm outdated', 'npm ls',
-  'node --version', 'npm --version', 'python --version', 'python3 --version',
-  'docker ps', 'docker images', 'docker inspect',
-  'cp ', 'mkdir ',
-];
+// SAFE_BASH_PREFIXES removed — replaced by isBashReadOnly() + STATE_MODIFYING_PATTERNS
 
 // Tools that always require escalation regardless of score (configurable)
 // ALWAYS_BLOCK replaced by ALWAYS_ESCALATE_TOOLS (injected above)
 
+// Read-only Bash command prefixes (whitelist).
+// If a command starts with one of these, it proceeds without System 2.
+// Anything NOT on this list goes to System 2.
+const READ_ONLY_BASH_PREFIXES = [
+  'ls', 'find', 'cat', 'head', 'tail', 'wc', 'file', 'stat', 'du', 'df',
+  'tree', 'realpath', 'basename', 'dirname', 'readlink',
+  'less', 'more',
+  'grep', 'rg', 'ag', 'awk', 'sed -n', 'sort', 'uniq', 'cut', 'tr',
+  'diff', 'comm', 'join', 'paste', 'fold', 'fmt', 'column',
+  'md5sum', 'sha256sum', 'sha1sum', 'cksum', 'b2sum',
+  'which', 'where', 'type', 'echo', 'printf', 'date', 'pwd', 'whoami', 'id',
+  'uname', 'hostname', 'env', 'printenv', 'locale', 'uptime', 'free',
+  'lsb_release', 'arch', 'nproc', 'getconf',
+  'ps', 'top -b', 'pgrep', 'lsof', 'ss', 'netstat', 'ip addr', 'ip route',
+  'ifconfig', 'ping', 'dig', 'nslookup', 'host', 'traceroute',
+  'git status', 'git log', 'git diff', 'git branch', 'git show',
+  'git remote', 'git tag', 'git rev-parse', 'git ls-files', 'git blame',
+  'git shortlog', 'git describe', 'git config --get', 'git config --list',
+  'npm list', 'npm view', 'npm outdated', 'npm ls', 'npm audit',
+  'pip list', 'pip show', 'pip freeze',
+  'dpkg -l', 'apt list', 'apk info',
+  'node --version', 'npm --version', 'python --version', 'python3 --version',
+  'pip --version', 'git --version', 'docker --version', 'java -version',
+  'docker ps', 'docker images', 'docker inspect', 'docker stats', 'docker logs',
+  'docker volume ls', 'docker network ls', 'docker info', 'docker version',
+  'cd ',
+  'curl -s', 'curl -I', 'curl -v', 'curl --head',
+  'jq',
+  'crontab -l',
+];
+
+const MAX_READ_SIZE = 50 * 1024 * 1024; // 50MB
+
+function isBashReadOnly(cmd) {
+  const trimmed = cmd.trimStart();
+  return READ_ONLY_BASH_PREFIXES.some(prefix => trimmed.startsWith(prefix));
+}
+
+function checkReadSize(cmd) {
+  const pathPatterns = [
+    /\bcat\s+(\/[^\s;|&]+)/,
+    /\bhead\s+(?:-\d+\s+)?(\/[^\s;|&]+)/,
+    /\btail\s+(?:-\d+\s+)?(\/[^\s;|&]+)/,
+    /\bless\s+(\/[^\s;|&]+)/,
+    /\bmore\s+(\/[^\s;|&]+)/,
+  ];
+  for (const pattern of pathPatterns) {
+    const match = cmd.match(pattern);
+    if (match) {
+      try {
+        const stat = fs.statSync(match[1]);
+        if (stat.size > MAX_READ_SIZE) {
+          return { path: match[1], size: stat.size };
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
 
 // ── Read stdin ────────────────────────────────────────────────────────
 const raw   = fs.readFileSync('/dev/stdin', 'utf8');
@@ -531,13 +578,19 @@ function parseSystem2Response(apiResult) {
     }
   }
 
-  // ── System 1: Step 1c — safe Bash commands ─────────────────────────
+  // ── System 1: Step 1c — Bash read-only vs state-modifying ──────────
   if (toolName === 'Bash') {
     const cmd = String(toolInput.command || '').trimStart();
-    const isSafe = SAFE_BASH_PREFIXES.some(prefix => cmd.startsWith(prefix));
-    if (isSafe) {
-      allow('Proceed', 'Bash command exempt (safe prefix)',
-            'Exempt', 'Exempt', 'Exempt', coherence, affective, provenance);
+
+    // Read-only commands proceed without System 2 (unless oversized resource)
+    if (isBashReadOnly(cmd)) {
+      const oversized = checkReadSize(cmd);
+      if (oversized) {
+        escalate(`Read target too large (${(oversized.size / 1024 / 1024).toFixed(0)}MB): ${oversized.path}`,
+                 'n/a', 'n/a', 'oversized-read', coherence, affective, provenance);
+      }
+      allow('Proceed', 'Read-only command',
+            'Exempt', 'Exempt', 'read-only', coherence, affective, provenance);
     }
   }
 

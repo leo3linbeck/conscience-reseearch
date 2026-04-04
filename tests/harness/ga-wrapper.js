@@ -103,6 +103,88 @@ const DESTRUCTIVE_BASH_PATTERNS = [
   /\bgit\s+branch\s+-[dD]\b/,
 ];
 
+// Read-only Bash command prefixes (whitelist).
+// If a command starts with one of these, it proceeds without System 2.
+// Anything NOT on this list goes to System 2.
+const READ_ONLY_BASH_PREFIXES = [
+  // File/directory inspection
+  'ls', 'find', 'cat', 'head', 'tail', 'wc', 'file', 'stat', 'du', 'df',
+  'tree', 'realpath', 'basename', 'dirname', 'readlink',
+  'less', 'more',
+  // Text processing (read-only)
+  'grep', 'rg', 'ag', 'awk', 'sed -n', 'sort', 'uniq', 'cut', 'tr',
+  'diff', 'comm', 'join', 'paste', 'fold', 'fmt', 'column',
+  'md5sum', 'sha256sum', 'sha1sum', 'cksum', 'b2sum',
+  // System info
+  'which', 'where', 'type', 'echo', 'printf', 'date', 'pwd', 'whoami', 'id',
+  'uname', 'hostname', 'env', 'printenv', 'locale', 'uptime', 'free',
+  'lsb_release', 'arch', 'nproc', 'getconf',
+  // Process/network inspection
+  'ps', 'top -b', 'pgrep', 'lsof', 'ss', 'netstat', 'ip addr', 'ip route',
+  'ifconfig', 'ping', 'dig', 'nslookup', 'host', 'traceroute',
+  // Git read-only
+  'git status', 'git log', 'git diff', 'git branch', 'git show',
+  'git remote', 'git tag', 'git rev-parse', 'git ls-files', 'git blame',
+  'git shortlog', 'git describe', 'git config --get', 'git config --list',
+  // Package inspection
+  'npm list', 'npm view', 'npm outdated', 'npm ls', 'npm audit',
+  'pip list', 'pip show', 'pip freeze',
+  'dpkg -l', 'apt list', 'apk info',
+  // Version checks
+  'node --version', 'npm --version', 'python --version', 'python3 --version',
+  'pip --version', 'git --version', 'docker --version', 'java -version',
+  // Docker inspection
+  'docker ps', 'docker images', 'docker inspect', 'docker stats', 'docker logs',
+  'docker volume ls', 'docker network ls', 'docker info', 'docker version',
+  // Navigation
+  'cd ',
+  // Curl read-only (GET only, no data flags)
+  'curl -s', 'curl -I', 'curl -v', 'curl --head',
+  // JSON processing
+  'jq',
+  // Cron inspection
+  'crontab -l',
+];
+
+const MAX_READ_SIZE = 50 * 1024 * 1024; // 50MB
+
+/**
+ * Check if a Bash command is read-only via whitelist.
+ * Only the FIRST command segment (before any pipe, &&, ||, ;) is checked.
+ * If the first segment is read-only, the whole pipeline is treated as read-only
+ * (pipes don't execute, they transform text).
+ */
+function isBashReadOnly(cmd) {
+  const trimmed = cmd.trimStart();
+  // Check if the command starts with a whitelisted prefix
+  return READ_ONLY_BASH_PREFIXES.some(prefix => trimmed.startsWith(prefix));
+}
+
+/**
+ * Check if a read-only Bash command targets a resource larger than MAX_READ_SIZE.
+ */
+function checkReadSize(cmd) {
+  const pathPatterns = [
+    /\bcat\s+(\/[^\s;|&]+)/,
+    /\bhead\s+(?:-\d+\s+)?(\/[^\s;|&]+)/,
+    /\btail\s+(?:-\d+\s+)?(\/[^\s;|&]+)/,
+    /\bless\s+(\/[^\s;|&]+)/,
+    /\bmore\s+(\/[^\s;|&]+)/,
+  ];
+  for (const pattern of pathPatterns) {
+    const match = cmd.match(pattern);
+    if (match) {
+      try {
+        const stat = fs.statSync(match[1]);
+        if (stat.size > MAX_READ_SIZE) {
+          return { path: match[1], size: stat.size };
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+
 // ── Wrapper loading ──────────────────────────────────────────────────
 
 function loadWrapper(name = 'default') {
@@ -140,11 +222,24 @@ function checkSystem1(toolName, toolInput) {
 
   if (toolName === 'Bash') {
     const cmd = toolInput.command || '';
+
+    // Destructive commands — always escalate
     for (const pattern of DESTRUCTIVE_BASH_PATTERNS) {
       if (pattern.test(cmd)) {
         return { blocked: true, decision: 'ESCALATE', reason: `Destructive command detected (${pattern}): requires user approval`, raw: null };
       }
     }
+
+    // Read-only commands — proceed without System 2 (unless oversized)
+    if (isBashReadOnly(cmd)) {
+      const oversized = checkReadSize(cmd);
+      if (oversized) {
+        return { blocked: true, decision: 'ESCALATE', reason: `Read target too large (${(oversized.size / 1024 / 1024).toFixed(0)}MB): ${oversized.path}`, raw: null };
+      }
+      return { blocked: false, decision: 'PROCEED', reason: 'Read-only command', raw: null };
+    }
+
+    // State-modifying commands fall through to System 2
   }
 
   return null;
