@@ -6,9 +6,13 @@
  * to ~/.claude/hooks/. The test system is the source of truth.
  *
  * Usage:
- *   node guardian-angel/install.js          # install/update
- *   node guardian-angel/install.js --dry-run # show what would be installed
- *   node guardian-angel/install.js --diff    # show what differs
+ *   node guardian-angel/install.js                      # install/update
+ *   node guardian-angel/install.js --dry-run             # show what would be installed
+ *   node guardian-angel/install.js --diff                # show what differs
+ *   node guardian-angel/install.js --set-key sk-ant-...  # save API key for System 2
+ *
+ * First-time setup (run from your terminal, not from Claude Code):
+ *   node guardian-angel/install.js --set-key $ANTHROPIC_API_KEY
  *
  * What gets installed:
  *   ~/.claude/hooks/guardian-angel.js        — the hook (System 1 + System 2)
@@ -35,6 +39,7 @@ const TEMPLATE_PATH = path.join(__dirname, 'hooks', 'guardian-angel.template.js'
 
 const DRY_RUN   = process.argv.includes('--dry-run');
 const SHOW_DIFF = process.argv.includes('--diff');
+const SET_KEY   = process.argv.includes('--set-key');
 
 // ── Source paths ─────────────────────────────────────────────────────
 const WRAPPER_SRC  = path.join(REPO_ROOT, 'tests', 'wrappers', 'default.txt');
@@ -385,7 +390,32 @@ const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
 
 // ── Install ──────────────────────────────────────────────────────────
 
-function install() {
+// ── Set API key command ──────────────────────────────────────────────
+if (SET_KEY) {
+  const keyFilePath = path.join(HOOKS_DIR, '.ga-api-key');
+  const keyArg = process.argv[process.argv.indexOf('--set-key') + 1];
+
+  if (keyArg && keyArg.startsWith('sk-')) {
+    // Key provided as argument
+    fs.mkdirSync(HOOKS_DIR, { recursive: true });
+    fs.writeFileSync(keyFilePath, keyArg, { mode: 0o600 });
+    console.log(`API key saved to ${keyFilePath}`);
+  } else if (process.env.ANTHROPIC_API_KEY) {
+    // Key from environment
+    fs.mkdirSync(HOOKS_DIR, { recursive: true });
+    fs.writeFileSync(keyFilePath, process.env.ANTHROPIC_API_KEY, { mode: 0o600 });
+    console.log(`API key saved to ${keyFilePath} (from ANTHROPIC_API_KEY env)`);
+  } else {
+    console.error('Usage: node install.js --set-key sk-ant-your-key-here');
+    console.error('   or: ANTHROPIC_API_KEY=sk-ant-... node install.js --set-key');
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+// ── Main install ─────────────────────────────────────────────────────
+
+async function install() {
   console.log('Guardian Angel — Install/Update');
   console.log('');
 
@@ -427,10 +457,64 @@ function install() {
     console.log(`  ✓ updated: ${REPO_HOOK}`);
   }
 
+  // Verify API key file for System 2
+  const keyFilePath = path.join(HOOKS_DIR, '.ga-api-key');
+  if (!DRY_RUN && !SHOW_DIFF) {
+    let keyValid = false;
+
+    // Check if key file exists and has content
+    if (fs.existsSync(keyFilePath)) {
+      const key = fs.readFileSync(keyFilePath, 'utf8').trim();
+      if (key && key.startsWith('sk-')) {
+        console.log(`  ✓ API key file: ${keyFilePath}`);
+        keyValid = true;
+      }
+    }
+
+    if (!keyValid) {
+      // Try to get key from environment
+      const envKey = process.env.ANTHROPIC_API_KEY;
+      if (envKey && envKey.startsWith('sk-')) {
+        fs.writeFileSync(keyFilePath, envKey, { mode: 0o600 });
+        console.log(`  ✓ created: ${keyFilePath} (from ANTHROPIC_API_KEY env)`);
+        keyValid = true;
+      }
+    }
+
+    if (!keyValid) {
+      // Prompt user for key
+      console.log('');
+      console.log('  Guardian Angel System 2 requires an Anthropic API key.');
+      console.log('  Claude Code scrubs API keys from hook environments,');
+      console.log('  so the key must be stored in a file.');
+      console.log('');
+
+      const readline = require('readline');
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+      await new Promise((resolve) => {
+        rl.question('  Enter your Anthropic API key (sk-ant-...): ', (answer) => {
+          rl.close();
+          const key = answer.trim();
+          if (key && key.startsWith('sk-')) {
+            fs.writeFileSync(keyFilePath, key, { mode: 0o600 });
+            console.log(`  ✓ created: ${keyFilePath}`);
+            resolve();
+          } else {
+            console.error('');
+            console.error('  ✗ Invalid key. Installation cannot complete without an API key.');
+            console.error('    Re-run install, or use: node install.js --set-key sk-ant-...');
+            process.exit(1);
+          }
+        });
+      });
+    }
+  }
+
   console.log('');
   if (!DRY_RUN && !SHOW_DIFF) {
     console.log('Installation complete. The hook will use the updated prompt on next tool call.');
   }
 }
 
-install();
+install().catch(err => { console.error(err.message); process.exit(1); });

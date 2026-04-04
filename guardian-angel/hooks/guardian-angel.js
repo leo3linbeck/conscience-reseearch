@@ -410,10 +410,24 @@ function buildSystem2UserMessage(promptClass) {
   return sections.join('\n');
 }
 
+// Load API key from file or environment. Claude Code scrubs ANTHROPIC_API_KEY
+// from subprocess environments, so the hook reads from a dedicated key file.
+const GA_API_KEY_PATH = path.join(HOOK_DIR, '.ga-api-key');
+
+function loadApiKey() {
+  // 1. Try environment (works in Docker test containers)
+  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+  // 2. Try GA-specific env var
+  if (process.env.GA_API_KEY) return process.env.GA_API_KEY;
+  // 3. Try key file (production — survives env scrubbing)
+  try { return fs.readFileSync(GA_API_KEY_PATH, 'utf8').trim(); }
+  catch { return null; }
+}
+
 async function invokeSystem2(promptClass) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = loadApiKey();
   if (!apiKey) {
-    return { decision: 'ESCALATE', reason: 'System 2 unavailable: no ANTHROPIC_API_KEY', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    return { decision: 'ESCALATE', reason: 'System 2 unavailable: no API key (set ANTHROPIC_API_KEY or create ' + GA_API_KEY_PATH + ')', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
   }
 
   const controller = new AbortController();
