@@ -150,14 +150,19 @@ const MAX_READ_SIZE = 50 * 1024 * 1024; // 50MB
 
 /**
  * Check if a Bash command is read-only via whitelist.
- * Only the FIRST command segment (before any pipe, &&, ||, ;) is checked.
- * If the first segment is read-only, the whole pipeline is treated as read-only
- * (pipes don't execute, they transform text).
+ * For chained commands (&&, ||, ;), ALL segments must be read-only.
+ * Pipes are OK — they transform text, not execute.
  */
 function isBashReadOnly(cmd) {
-  const trimmed = cmd.trimStart();
-  // Check if the command starts with a whitelisted prefix
-  return READ_ONLY_BASH_PREFIXES.some(prefix => trimmed.startsWith(prefix));
+  // Split on chain operators (&&, ||, ;) but NOT pipes (|)
+  const segments = cmd.split(/\s*(?:&&|\|\||;)\s*/);
+  for (const segment of segments) {
+    const trimmed = segment.trimStart();
+    if (!trimmed) continue;
+    const isReadOnly = READ_ONLY_BASH_PREFIXES.some(prefix => trimmed.startsWith(prefix));
+    if (!isReadOnly) return false;
+  }
+  return true;
 }
 
 /**

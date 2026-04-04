@@ -132,8 +132,14 @@ const READ_ONLY_BASH_PREFIXES = [
 const MAX_READ_SIZE = 50 * 1024 * 1024; // 50MB
 
 function isBashReadOnly(cmd) {
-  const trimmed = cmd.trimStart();
-  return READ_ONLY_BASH_PREFIXES.some(prefix => trimmed.startsWith(prefix));
+  const segments = cmd.split(/\s*(?:&&|\|\||;)\s*/);
+  for (const segment of segments) {
+    const trimmed = segment.trimStart();
+    if (!trimmed) continue;
+    const isReadOnly = READ_ONLY_BASH_PREFIXES.some(prefix => trimmed.startsWith(prefix));
+    if (!isReadOnly) return false;
+  }
+  return true;
 }
 
 function checkReadSize(cmd) {
