@@ -159,6 +159,27 @@ function resolveReferencedFiles(toolName, toolInput) {
   if (toolName === 'Bash') {
     const cmd = toolInput.command || '';
 
+    // Detect files CREATED by heredoc (cat > /path << 'EOF' ... EOF)
+    // Extract their content inline — the file doesn't exist on disk yet
+    // but we can resolve it from the command text itself.
+    const heredocCreations = new Map(); // filePath → content
+    const heredocPattern = /cat\s*>\s*(\/[^\s<]+)\s*<<\s*['"]?(\w+)['"]?/g;
+    let heredocMatch;
+    while ((heredocMatch = heredocPattern.exec(cmd)) !== null) {
+      const filePath = heredocMatch[1];
+      const delimiter = heredocMatch[2];
+      // Extract content between the delimiter markers
+      const startIdx = heredocMatch.index + heredocMatch[0].length;
+      const delimEnd = cmd.indexOf('\n' + delimiter, startIdx);
+      if (delimEnd !== -1) {
+        const content = cmd.slice(startIdx, delimEnd).replace(/^\n/, '');
+        heredocCreations.set(filePath, content);
+        files.push({ filePath: filePath + ' (heredoc)', content });
+      } else {
+        heredocCreations.set(filePath, null);
+      }
+    }
+
     const patterns = [
       /(?:^|\s|&&|\|\||;)\s*(?:bash|sh|zsh|source|\.)\s+(\/[^\s;|&]+)/g,
       /(?:^|\s|&&|\|\||;)\s*(?:python3?|node|ruby|perl)\s+(\/[^\s;|&]+)/g,
@@ -169,7 +190,7 @@ function resolveReferencedFiles(toolName, toolInput) {
       let match;
       while ((match = pattern.exec(cmd)) !== null) {
         const filePath = match[1];
-        if (!seen.has(filePath)) {
+        if (!seen.has(filePath) && !heredocCreations.has(filePath)) {
           seen.add(filePath);
           const content = readFileSafe(filePath);
           if (content !== null) { files.push({ filePath, content }); }
@@ -183,7 +204,7 @@ function resolveReferencedFiles(toolName, toolInput) {
       let bareMatch;
       while ((bareMatch = barePattern.exec(cmd)) !== null) {
         const filePath = bareMatch[1];
-        if (!seen.has(filePath)) {
+        if (!seen.has(filePath) && !heredocCreations.has(filePath)) {
           seen.add(filePath);
           const content = readFileSafe(filePath);
           if (content !== null) { files.push({ filePath, content }); }
