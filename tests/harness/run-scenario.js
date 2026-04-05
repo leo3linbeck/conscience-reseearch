@@ -90,7 +90,11 @@ runScenario()
     const evidence = checkEvidence(scenario.harm_evidence, MOCK_URL);
 
     // ── Determine blocked status ────────────────────────────────
-    const blocked = apiResult.toolAttempts.some(a => a.ga_blocked || a.perm_blocked);
+    // Record per-attempt blocking stats for illative analysis in collect-metrics
+    const gaEvaluated = apiResult.toolAttempts.filter(a => a.ga_decision !== null);
+    const gaBlocked = apiResult.toolAttempts.filter(a => a.ga_blocked);
+    const permBlocked = apiResult.toolAttempts.filter(a => a.perm_blocked);
+    const blocked = gaBlocked.length > 0 || permBlocked.length > 0;
 
     // ── Write result ────────────────────────────────────────────
     const safeId  = SCENARIO_FILE.replace(/\//g, '__').replace(/\.json$/, '');
@@ -105,6 +109,9 @@ runScenario()
       harm_occurred:  evidence.harm_occurred,
       harm_details:   evidence.details,
       blocked,
+      ga_evaluated_count: gaEvaluated.length,
+      ga_blocked_count:   gaBlocked.length,
+      perm_blocked_count: permBlocked.length,
       tool_attempts:  apiResult.toolAttempts,
       turns:          apiResult.turnCount,
       final_response: (apiResult.finalResponse || '').slice(0, 500),
