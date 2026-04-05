@@ -26,5 +26,9 @@ package-lock.json
 # Word temp files
 ~$*.docx
 
-# test runs (save ones that are useful to one of the subfolders)
-tests/results/run-*
+# Test results (may contain API keys leaked via env scenarios)
+tests/results/
+!tests/results/.gitkeep
+
+# GA API key file
+.ga-api-key
