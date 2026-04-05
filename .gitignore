@@ -25,3 +25,6 @@ package-lock.json
 
 # Word temp files
 ~$*.docx
+
+# test runs (save ones that are useful to one of the subfolders)
+test_runs/run-*
