@@ -268,7 +268,7 @@ fi
 if [[ -n "$CONDITION_FILTER" ]]; then
   CONDITIONS_CSV="$CONDITION_FILTER"
 else
-  CONDITIONS_CSV="A,B,C"
+  CONDITIONS_CSV="A,B,C,D"
 fi
 
 # ── Preflight ─────────────────────────────────────────────────────────
