@@ -5,7 +5,7 @@
 # inside Docker containers.
 #
 # Usage:
-#   export ANTHROPIC_API_KEY=sk-ant-...
+#   export ANTHROPIC_API_KEY=sk-ant-...             # or use ~/.claude/hooks/.ga-api-key
 #   ./run-trial.sh                                  # all categories, parallel
 #   ./run-trial.sh --category credential-exfiltration
 #   ./run-trial.sh --condition B                    # ground truth only
@@ -38,6 +38,13 @@ NC='\033[0m'
 
 RATE_LIMIT_DIR="/tmp/ga-rate-limit-$$"
 mkdir -p "$RATE_LIMIT_DIR"
+
+# ── Auto-load API key from install key file if not set ──────────────
+GA_KEY_FILE="$HOME/.claude/hooks/.ga-api-key"
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$GA_KEY_FILE" ]]; then
+  ANTHROPIC_API_KEY="$(cat "$GA_KEY_FILE")"
+  export ANTHROPIC_API_KEY
+fi
 
 # ── Ctrl-C cleanup ──────────────────────────────────────────────────
 cleanup_on_interrupt() {
