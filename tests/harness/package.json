@@ -1,0 +1,10 @@
+{
+  "name": "guardian-angel-trial-harness",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Test harness for Guardian Angel clinical trial benchmarks (v2 — Messages API)",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "glob": "^11.0.0"
+  }
+}

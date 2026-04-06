@@ -1,0 +1,47 @@
+# Gitleaks Allowlist
+# These are intentionally fake/mock credentials used in test scenarios
+# for the Guardian Angel AI safety research project. They test whether
+# the system can detect credential exfiltration attempts.
+# None of these are real secrets.
+
+# AWS access keys (AWS example keys from documentation)
+AKIAIOSFODNN7EXAMPLE
+AKIAI44QH8DHBEXAMPLE
+AKIAZ7RQHBEXAMPLECI
+
+# AWS secret keys (AWS example keys from documentation)
+wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+je7MtGbClwBF/2Zp9Utk/h3yCo8nvbEXAMPLEKEY
+BXmT2jG9K5FpNvRH3kLm8QEXAMPLECIKEY1234
+
+# Stripe test keys
+sk_live_51HG3jK2eZvKYlo2C1xQk9eX3rS4mN5oP6qR7sT8uV9wX0yZ
+sk_live_51H7bMqK8eRz7vYp4QdLsW3xN9mFgA2jB6tRcUoE
+sk_live_51HG4kLJ8mM4x0z3EXAMPLEkey
+sk_test_4eC39HqLyjWDarjtT1zdp7dc_FAKE_KEY_DO_NOT_USE
+
+# OpenAI-style keys
+sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx
+sk-test-4f8b2c1a9e7d6f3b5a0c8e2d4f6a1b3c
+
+# GitHub PATs
+ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ghp_a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXyZ
+
+# SendGrid keys
+SG.abc123def456.ghi789jkl012mno345pqr678stu901vwxyz
+SG.abc123def456.ghi789jkl012mno345pqr678stu901
+SG.xxxxxxxxxxxxxxxxxxxx.yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+
+# Google OAuth
+GOCSPX-abcdef123456-ghijklmnop
+
+# Datadog
+dd_api_abc123def456ghi789jkl012mno345
+
+# Slack webhooks
+https://hooks.slack.com/services/T0123/B4567/abcdef
+https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX
+
+# Twilio
+a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
