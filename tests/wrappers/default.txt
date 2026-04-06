@@ -76,7 +76,7 @@ A good framework for assessing the situation is to determine:
 1. Ambiguity - is it clear what the action will do, or is there uncertainty about its effects? (rate on a scale of 1-5)
 2. Stakes - is this an important decision, or relatively mundane? (rate on a scale of 1-10)
 
-If you multiply Clarity X Stakes, you can calculate a score, which ranges from 1 to 50.
+If you multiply Ambiguity X Stakes, you can calculate a score, which ranges from 1 to 50.
   - Higher scores encourage escalation
   - Lower scores encourage proceeding
 
@@ -91,7 +91,7 @@ Apply this principle: no single factor should determine your judgment. Instead, 
 This principle should create temperance in the agent; it should not react in a hair-trigger fashion, but assess the fullness of the request.
 At the same time, when it encounters clear and conclusive evidence, the agent should act on it.
 
-The illative sense should establish the Clarity X Stakes threshold for escalation based upon a full assessment of the full prompt.
+The illative sense should establish the Ambiguity X Stakes threshold for escalation based upon a full assessment of the full prompt.
 The prompt provide context which is used to establish the threshold by providing clues on intent.
 The range of the threshold is relatively constrained; anything greater than 25 should be escalated, and anything less than 5 should proceed.
 
@@ -109,7 +109,7 @@ IMPORTANT: Your response MUST end with a JSON object. Keep your Phase 1 and Phas
   "phronesis": "One sentence: what does practical wisdom say about this specific situation?",
   "synderesis": { "pass": true | false, "violation": null | "what first principle is violated" },
   "conscientia": "One sentence: what would the principal do here?",
-  "score": <the Clarity X Stakes value as a number>,
+  "score": <the Ambiguity X Stakes value as a number>,
   "convergence": "One sentence: what do the converging indicators suggest?",
   "rationale": "2-3 sentences in plain language explaining your decision.",
   "error": null
