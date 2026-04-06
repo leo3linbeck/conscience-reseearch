@@ -436,68 +436,122 @@ function reportFailures(label, condKey, metrics) {
 reportFailures('GA Default (C)', 'C', metricsC);
 reportFailures('GA Alternative (D)', 'D', metricsD);
 
-// ── Run Times ────────────────────────────────────────────────────────
-lines.push('## Run Times');
-lines.push('');
-
-// Build timing data: scenario → condition → duration_ms
-const timingData = {};
-const allTimings = [];
-for (const [scenario, condResults] of Object.entries(scenarioMap)) {
-  timingData[scenario] = {};
-  for (const [cond, result] of Object.entries(condResults)) {
-    const ms = result.duration_ms || 0;
-    timingData[scenario][cond] = ms;
-    allTimings.push(ms);
-  }
-}
+// ── GA Latency ──────────────────────────────────────────────────────
+// Only measure GA conditions (C/D). The question is: how much additional
+// latency does GA add? System 1 (deterministic) vs System 2 (LLM call).
+const gaCondColumns = condColumns.filter(c => c.key === 'C' || c.key === 'D');
 
 function formatDuration(ms) {
-  if (!ms) return '—';
+  if (!ms && ms !== 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   return (ms / 1000).toFixed(1) + 's';
 }
 
-// Table header
-const timeColHeaders = condColumns.map(c => c.label).join(' | ');
-const timeColDashes = condColumns.map(() => '---:').join(' | ');
-lines.push(`| Scenario | ${timeColHeaders} |`);
-lines.push(`|----------|${timeColDashes}|`);
+if (gaCondColumns.length > 0) {
+  lines.push('## GA Latency (Additional Processing Time)');
+  lines.push('');
+  lines.push('Measures only Guardian Angel evaluation time — the additional latency GA adds per scenario.');
+  lines.push('System 1 = deterministic checks (fast). System 2 = LLM evaluation call (slower).');
+  lines.push('');
 
-// Find max duration per scenario for highlighting
-for (const scenario of allScenarios) {
-  const durations = condColumns.map(c => timingData[scenario]?.[c.key] || 0);
-  const maxDur = Math.max(...durations);
-
-  const cells = condColumns.map(c => {
-    const ms = timingData[scenario]?.[c.key] || 0;
-    const formatted = formatDuration(ms);
-    return ms === maxDur && ms > 0 ? `**${formatted}**` : formatted;
-  }).join(' | ');
-
-  lines.push(`| ${scenario} | ${cells} |`);
-}
-
-// Statistics
-const statsByCondition = {};
-for (const col of condColumns) {
-  const times = [];
-  for (const scenario of allScenarios) {
-    const ms = timingData[scenario]?.[col.key];
-    if (ms) times.push(ms);
+  // Collect per-scenario GA timing
+  const gaTimingData = {};
+  for (const [scenario, condResults] of Object.entries(scenarioMap)) {
+    gaTimingData[scenario] = {};
+    for (const col of gaCondColumns) {
+      const r = condResults[col.key];
+      if (!r) continue;
+      // Use aggregated ga_timing from run-scenario if available
+      if (r.ga_timing) {
+        gaTimingData[scenario][col.key] = r.ga_timing;
+      } else {
+        // Fall back: aggregate from per-attempt ga_timing fields
+        const timings = (r.tool_attempts || [])
+          .filter(a => a.ga_timing)
+          .map(a => a.ga_timing);
+        if (timings.length > 0) {
+          gaTimingData[scenario][col.key] = {
+            total_ms:   timings.reduce((s, t) => s + t.total_ms, 0),
+            system1_ms: timings.reduce((s, t) => s + t.system1_ms, 0),
+            system2_ms: timings.reduce((s, t) => s + t.system2_ms, 0),
+            calls:      timings.length,
+            s1_only:    timings.filter(t => t.resolved_by === 'system1').length,
+            s2_calls:   timings.filter(t => t.resolved_by === 'system2' || t.resolved_by === 'system2_error').length,
+          };
+        }
+      }
+    }
   }
-  const mean = times.length ? times.reduce((a, b) => a + b, 0) / times.length : 0;
-  const max = times.length ? Math.max(...times) : 0;
-  const min = times.length ? Math.min(...times) : 0;
-  const variance = times.length ? times.reduce((a, b) => a + (b - mean) ** 2, 0) / times.length : 0;
-  const stddev = Math.sqrt(variance);
-  statsByCondition[col.key] = { mean, max, min, stddev, count: times.length };
+
+  // Per-scenario table
+  const gaTimeHeaders = gaCondColumns.map(c => `${c.label} Total | S1 | S2 | Calls`).join(' | ');
+  const gaTimeDashes  = gaCondColumns.map(() => '---: | ---: | ---: | ---:').join(' | ');
+  lines.push(`| Scenario | ${gaTimeHeaders} |`);
+  lines.push(`|----------|${gaTimeDashes}|`);
+
+  for (const scenario of allScenarios) {
+    const cells = gaCondColumns.map(c => {
+      const t = gaTimingData[scenario]?.[c.key];
+      if (!t) return '— | — | — | —';
+      return `${formatDuration(t.total_ms)} | ${formatDuration(t.system1_ms)} | ${formatDuration(t.system2_ms)} | ${t.calls}`;
+    }).join(' | ');
+    lines.push(`| ${scenario} | ${cells} |`);
+  }
+
+  // Aggregate stats per GA condition
+  lines.push('');
+  lines.push('### GA Latency Summary');
+  lines.push('');
+
+  const gaStats = {};
+  for (const col of gaCondColumns) {
+    const totals = [], s1s = [], s2s = [], callCounts = [], s1Only = [], s2Calls = [];
+    for (const scenario of allScenarios) {
+      const t = gaTimingData[scenario]?.[col.key];
+      if (!t) continue;
+      totals.push(t.total_ms);
+      s1s.push(t.system1_ms);
+      s2s.push(t.system2_ms);
+      callCounts.push(t.calls);
+      s1Only.push(t.s1_only || 0);
+      s2Calls.push(t.s2_calls || 0);
+    }
+    const stats = (arr) => {
+      if (arr.length === 0) return { mean: 0, max: 0, min: 0, stddev: 0, sum: 0, count: 0 };
+      const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+      const variance = arr.reduce((a, b) => a + (b - mean) ** 2, 0) / arr.length;
+      return { mean, max: Math.max(...arr), min: Math.min(...arr), stddev: Math.sqrt(variance), sum: arr.reduce((a, b) => a + b, 0), count: arr.length };
+    };
+    gaStats[col.key] = {
+      total: stats(totals), system1: stats(s1s), system2: stats(s2s),
+      calls: stats(callCounts), s1Only: s1Only.reduce((a, b) => a + b, 0),
+      s2Calls: s2Calls.reduce((a, b) => a + b, 0),
+    };
+  }
+
+  const sumHeaders = gaCondColumns.map(c => c.label).join(' | ');
+  const sumDashes  = gaCondColumns.map(() => '---').join(' | ');
+  lines.push(`| Metric | ${sumHeaders} |`);
+  lines.push(`|--------|${sumDashes}|`);
+
+  function gaRow(label, getter) {
+    const vals = gaCondColumns.map(c => getter(gaStats[c.key]));
+    lines.push(`| ${label} | ${vals.join(' | ')} |`);
+  }
+
+  gaRow('**Total GA time (sum)**', s => formatDuration(s.total.sum));
+  gaRow('**Mean GA time / scenario**', s => formatDuration(s.total.mean));
+  gaRow('Max GA time / scenario', s => formatDuration(s.total.max));
+  gaRow('Min GA time / scenario', s => formatDuration(s.total.min));
+  gaRow('Std Dev', s => formatDuration(s.total.stddev));
+  gaRow('Mean System 1 / scenario', s => formatDuration(s.system1.mean));
+  gaRow('Mean System 2 / scenario', s => formatDuration(s.system2.mean));
+  gaRow('Total S1-only resolutions', s => s.s1Only);
+  gaRow('Total S2 LLM calls', s => s.s2Calls);
+  gaRow('Mean GA calls / scenario', s => s.calls.mean.toFixed(1));
+  lines.push('');
 }
 
-lines.push(`| **Mean** | ${condColumns.map(c => formatDuration(statsByCondition[c.key].mean)).join(' | ')} |`);
-lines.push(`| **Max** | ${condColumns.map(c => `**${formatDuration(statsByCondition[c.key].max)}**`).join(' | ')} |`);
-lines.push(`| **Min** | ${condColumns.map(c => formatDuration(statsByCondition[c.key].min)).join(' | ')} |`);
-lines.push(`| **Std Dev** | ${condColumns.map(c => formatDuration(statsByCondition[c.key].stddev)).join(' | ')} |`);
-lines.push('');
 
 // ── Model Interference Analysis ──────────────────────────────────────
 // Quantify cases where Claude's safety training preempted GA evaluation
@@ -588,7 +642,7 @@ const summary = {
   condition_B: metricsB ? { counts: metricsB.counts, metrics: metricsB.metrics, by_category: metricsB.byCategory } : null,
   condition_C: metricsC ? { counts: metricsC.counts, metrics: metricsC.metrics, by_category: metricsC.byCategory } : null,
   condition_D: metricsD ? { counts: metricsD.counts, metrics: metricsD.metrics, by_category: metricsD.byCategory } : null,
-  timing: statsByCondition,
+  ga_timing: typeof gaStats !== 'undefined' ? gaStats : null,
   model_interference: interferenceData,
   failures:    allFailures.map(f => ({
     scenario: f.scenario,

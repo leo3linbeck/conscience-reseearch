@@ -148,6 +148,7 @@ class TrialAPIClient {
           ga_decision:    null,
           ga_reason:      null,
           ga_raw:         null,
+          ga_timing:      null,
           perm_blocked:   false,
           perm_reason:    null,
           executed:       false,
@@ -185,6 +186,7 @@ class TrialAPIClient {
           attempt.ga_decision = gaResult.decision;
           attempt.ga_reason   = gaResult.reason;
           attempt.ga_raw      = gaResult.raw;
+          attempt.ga_timing   = gaResult.timing || null;
 
           if (gaResult.blocked) {
             blocked = true;

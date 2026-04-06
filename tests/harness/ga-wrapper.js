@@ -514,24 +514,33 @@ async function callOpenAI(systemPrompt, userMessage, model, apiKey) {
  */
 async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt, apiKey, opts = {}) {
   if (!apiKey) {
-    return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null };
+    return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null, timing: null };
   }
+
+  const t0 = Date.now();
 
   // ── System 1 ─────────────────────────────────────────────────────
   const s1Result = checkSystem1(toolName, toolInput);
-  if (s1Result) return s1Result;
+  if (s1Result) {
+    const s1_ms = Date.now() - t0;
+    s1Result.timing = { system1_ms: s1_ms, system2_ms: 0, total_ms: s1_ms, resolved_by: 'system1' };
+    return s1Result;
+  }
 
+  const s1_ms = Date.now() - t0;
   const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
 
   // ── Script resolution ────────────────────────────────────────────
   const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
 
   if (unresolved.length > 0) {
+    const total_ms = Date.now() - t0;
     return {
       blocked: true,
       decision: 'ESCALATE',
       reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
       raw: null,
+      timing: { system1_ms: s1_ms, system2_ms: 0, total_ms, resolved_by: 'system1' },
     };
   }
 
@@ -570,11 +579,19 @@ User's instruction: "${userPrompt}"`;
   userMessage += '\nPerform your two-step analysis (compile, then evaluate) and return your JSON decision.';
 
   // ── API call (rate-limited) ──────────────────────────────────────
+  const t2 = Date.now();
   try {
     const text = await callLLM(wrapperText, userMessage, model, apiKey);
-    return parseResponseText(text);
+    const system2_ms = Date.now() - t2;
+    const total_ms   = Date.now() - t0;
+    const result = parseResponseText(text);
+    result.timing = { system1_ms: s1_ms, system2_ms, total_ms, resolved_by: 'system2' };
+    return result;
   } catch (err) {
-    return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null };
+    const system2_ms = Date.now() - t2;
+    const total_ms   = Date.now() - t0;
+    return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null,
+             timing: { system1_ms: s1_ms, system2_ms, total_ms, resolved_by: 'system2_error' } };
   }
 }
 

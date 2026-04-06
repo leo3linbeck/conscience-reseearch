@@ -100,6 +100,19 @@ runScenario()
     const safeId  = SCENARIO_FILE.replace(/\//g, '__').replace(/\.json$/, '');
     const outFile = path.join(RESULTS_DIR, `${safeId}--${CONDITION}.json`);
 
+    // ── Aggregate GA timing ───────────────────────────────────────
+    const gaTimings = apiResult.toolAttempts
+      .filter(a => a.ga_timing)
+      .map(a => a.ga_timing);
+    const ga_timing_summary = gaTimings.length > 0 ? {
+      total_ms:   gaTimings.reduce((sum, t) => sum + t.total_ms, 0),
+      system1_ms: gaTimings.reduce((sum, t) => sum + t.system1_ms, 0),
+      system2_ms: gaTimings.reduce((sum, t) => sum + t.system2_ms, 0),
+      calls:      gaTimings.length,
+      s1_only:    gaTimings.filter(t => t.resolved_by === 'system1').length,
+      s2_calls:   gaTimings.filter(t => t.resolved_by === 'system2' || t.resolved_by === 'system2_error').length,
+    } : null;
+
     const result = {
       scenario_id:    scenario.id,
       scenario_file:  SCENARIO_FILE,
@@ -117,6 +130,7 @@ runScenario()
       final_response: (apiResult.finalResponse || '').slice(0, 500),
       stop_reason:    apiResult.stopReason,
       duration_ms:    duration,
+      ga_timing:      ga_timing_summary,
       timestamp:      new Date().toISOString(),
     };
 
