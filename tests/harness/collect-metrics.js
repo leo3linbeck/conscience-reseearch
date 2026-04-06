@@ -483,17 +483,21 @@ if (gaCondColumns.length > 0) {
     }
   }
 
-  // Per-scenario table
-  const gaTimeHeaders = gaCondColumns.map(c => `${c.label} Total | S1 | S2 | Calls`).join(' | ');
-  const gaTimeDashes  = gaCondColumns.map(() => '---: | ---: | ---: | ---:').join(' | ');
+  // Per-scenario table (includes total run time and GA % for C/D)
+  const gaTimeHeaders = gaCondColumns.map(c => `${c.label} Run Time | GA Total | GA % | S1 | S2 | Calls`).join(' | ');
+  const gaTimeDashes  = gaCondColumns.map(() => '---: | ---: | ---: | ---: | ---: | ---:').join(' | ');
   lines.push(`| Scenario | ${gaTimeHeaders} |`);
   lines.push(`|----------|${gaTimeDashes}|`);
 
   for (const scenario of allScenarios) {
     const cells = gaCondColumns.map(c => {
       const t = gaTimingData[scenario]?.[c.key];
-      if (!t) return '— | — | — | —';
-      return `${formatDuration(t.total_ms)} | ${formatDuration(t.system1_ms)} | ${formatDuration(t.system2_ms)} | ${t.calls}`;
+      const r = scenarioMap[scenario]?.[c.key];
+      const runTime = r?.duration_ms;
+      const runTimeStr = formatDuration(runTime);
+      if (!t) return `${runTimeStr} | — | — | — | — | —`;
+      const gaPct = (runTime && runTime > 0) ? ((t.total_ms / runTime) * 100).toFixed(1) + '%' : '—';
+      return `${runTimeStr} | ${formatDuration(t.total_ms)} | ${gaPct} | ${formatDuration(t.system1_ms)} | ${formatDuration(t.system2_ms)} | ${t.calls}`;
     }).join(' | ');
     lines.push(`| ${scenario} | ${cells} |`);
   }
@@ -505,9 +509,10 @@ if (gaCondColumns.length > 0) {
 
   const gaStats = {};
   for (const col of gaCondColumns) {
-    const totals = [], s1s = [], s2s = [], callCounts = [], s1Only = [], s2Calls = [];
+    const totals = [], s1s = [], s2s = [], callCounts = [], s1Only = [], s2Calls = [], runTimes = [], gaPcts = [];
     for (const scenario of allScenarios) {
       const t = gaTimingData[scenario]?.[col.key];
+      const r = scenarioMap[scenario]?.[col.key];
       if (!t) continue;
       totals.push(t.total_ms);
       s1s.push(t.system1_ms);
@@ -515,6 +520,10 @@ if (gaCondColumns.length > 0) {
       callCounts.push(t.calls);
       s1Only.push(t.s1_only || 0);
       s2Calls.push(t.s2_calls || 0);
+      if (r?.duration_ms && r.duration_ms > 0) {
+        runTimes.push(r.duration_ms);
+        gaPcts.push((t.total_ms / r.duration_ms) * 100);
+      }
     }
     const stats = (arr) => {
       if (arr.length === 0) return { mean: 0, max: 0, min: 0, stddev: 0, sum: 0, count: 0 };
@@ -526,6 +535,7 @@ if (gaCondColumns.length > 0) {
       total: stats(totals), system1: stats(s1s), system2: stats(s2s),
       calls: stats(callCounts), s1Only: s1Only.reduce((a, b) => a + b, 0),
       s2Calls: s2Calls.reduce((a, b) => a + b, 0),
+      runTime: stats(runTimes), gaPct: stats(gaPcts),
     };
   }
 
@@ -539,8 +549,12 @@ if (gaCondColumns.length > 0) {
     lines.push(`| ${label} | ${vals.join(' | ')} |`);
   }
 
+  gaRow('**Total run time (sum)**', s => formatDuration(s.runTime.sum));
+  gaRow('**Mean run time / scenario**', s => formatDuration(s.runTime.mean));
   gaRow('**Total GA time (sum)**', s => formatDuration(s.total.sum));
   gaRow('**Mean GA time / scenario**', s => formatDuration(s.total.mean));
+  gaRow('**Mean GA % of run time**', s => s.gaPct.count > 0 ? s.gaPct.mean.toFixed(1) + '%' : '—');
+  gaRow('Max GA % of run time', s => s.gaPct.count > 0 ? s.gaPct.max.toFixed(1) + '%' : '—');
   gaRow('Max GA time / scenario', s => formatDuration(s.total.max));
   gaRow('Min GA time / scenario', s => formatDuration(s.total.min));
   gaRow('Std Dev', s => formatDuration(s.total.stddev));
