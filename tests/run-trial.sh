@@ -12,7 +12,11 @@
 #   ./run-trial.sh --condition C                    # treatment only
 #   ./run-trial.sh --scenario credential-exfiltration/harmful/h001.json
 #   ./run-trial.sh --wrapper my-optimized           # use wrappers/my-optimized.txt
-#   ./run-trial.sh --model claude-haiku-4-5-20251001
+#   ./run-trial.sh --model claude-haiku-4-5-20251001  # agent model (all conditions)
+#   ./run-trial.sh --ga-model gemini-2.5-flash      # GA evaluator model (C/D only)
+#   ./run-trial.sh --ga-key AIza...                 # GA evaluator API key
+#   ./run-trial.sh --ga-endpoint https://generativelanguage.googleapis.com
+#   ./run-trial.sh --ga-format openai               # anthropic, openai, or ollama
 #   ./run-trial.sh --optimize [--max-iter N]        # run optimization loop
 #   ./run-trial.sh --sequential                     # serial mode
 #   ./run-trial.sh --v2                             # run legacy v2 scenarios
@@ -46,6 +50,14 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$GA_KEY_FILE" ]]; then
   export ANTHROPIC_API_KEY
 fi
 
+# Helper: append GA-specific env vars to a DOCKER_ENV array
+append_ga_env() {
+  [[ -n "$GA_MODEL_OVERRIDE" ]]    && DOCKER_ENV+=(-e "GA_MODEL=$GA_MODEL_OVERRIDE")
+  [[ -n "$GA_KEY_OVERRIDE" ]]      && DOCKER_ENV+=(-e "GA_API_KEY=$GA_KEY_OVERRIDE")
+  [[ -n "$GA_ENDPOINT_OVERRIDE" ]] && DOCKER_ENV+=(-e "GA_API_BASE=$GA_ENDPOINT_OVERRIDE")
+  [[ -n "$GA_FORMAT_OVERRIDE" ]]   && DOCKER_ENV+=(-e "GA_API_FORMAT=$GA_FORMAT_OVERRIDE")
+}
+
 # ── Ctrl-C cleanup ──────────────────────────────────────────────────
 cleanup_on_interrupt() {
   echo ""
@@ -64,6 +76,10 @@ CONDITION_FILTER=""
 SCENARIO_FILTER=""
 CATEGORY_FILTER=""
 MODEL_OVERRIDE=""
+GA_MODEL_OVERRIDE=""
+GA_KEY_OVERRIDE=""
+GA_ENDPOINT_OVERRIDE=""
+GA_FORMAT_OVERRIDE=""
 WRAPPER_NAME="default"
 USE_V2=false
 PARALLEL=true
@@ -78,8 +94,12 @@ while [[ "$#" -gt 0 ]]; do
     --condition)     CONDITION_FILTER="$2"; shift 2 ;;
     --scenario)      SCENARIO_FILTER="$2";  shift 2 ;;
     --category)      CATEGORY_FILTER="$2";  shift 2 ;;
-    --model)         MODEL_OVERRIDE="$2";   shift 2 ;;
-    --wrapper)       WRAPPER_NAME="$2";     shift 2 ;;
+    --model)         MODEL_OVERRIDE="$2";       shift 2 ;;
+    --ga-model)      GA_MODEL_OVERRIDE="$2";   shift 2 ;;
+    --ga-key)        GA_KEY_OVERRIDE="$2";     shift 2 ;;
+    --ga-endpoint)   GA_ENDPOINT_OVERRIDE="$2"; shift 2 ;;
+    --ga-format)     GA_FORMAT_OVERRIDE="$2";  shift 2 ;;
+    --wrapper)       WRAPPER_NAME="$2";        shift 2 ;;
     --v2)            USE_V2=true;           shift ;;
     --sequential)    PARALLEL=false;        shift ;;
     --max-parallel)  MAX_PARALLEL="$2";     shift 2 ;;
@@ -139,7 +159,8 @@ if [[ -n "$RERUN_FAILURES" ]]; then
   echo "  Conditions: $RERUN_CONDITIONS"
   echo "  Wrapper C: $WRAPPER_NAME"
   [[ "$AB_TEST" == "true" ]] && echo "  Wrapper D: alternative"
-  [[ -n "$MODEL_OVERRIDE" ]] && echo "  Model: $MODEL_OVERRIDE"
+  [[ -n "$MODEL_OVERRIDE" ]] && echo "  Agent model: $MODEL_OVERRIDE"
+  [[ -n "$GA_MODEL_OVERRIDE" ]] && echo "  GA model: $GA_MODEL_OVERRIDE"
   echo "═══════════════════════════════════════════════════════"
   echo ""
 
@@ -192,6 +213,7 @@ if [[ -n "$RERUN_FAILURES" ]]; then
         -e "WRAPPER_FILE=$WRAPPER_NAME"
       )
       [[ -n "$MODEL_OVERRIDE" ]] && DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
+      append_ga_env
 
       EXIT_CODE=0
       docker run --rm --init --network "$NETWORK" \
@@ -288,7 +310,9 @@ echo "  Run: $TIMESTAMP"
 echo "  Mode: $MODE_LABEL (${#SCENARIO_DIRS[@]} categories)"
 echo "  Conditions: $CONDITIONS_CSV"
 echo "  Wrapper: $WRAPPER_NAME"
-[[ -n "$MODEL_OVERRIDE" ]] && echo "  Model: $MODEL_OVERRIDE"
+[[ -n "$MODEL_OVERRIDE" ]] && echo "  Agent model: $MODEL_OVERRIDE"
+[[ -n "$GA_MODEL_OVERRIDE" ]] && echo "  GA model: $GA_MODEL_OVERRIDE"
+[[ -n "$GA_ENDPOINT_OVERRIDE" ]] && echo "  GA endpoint: $GA_ENDPOINT_OVERRIDE"
 [[ -n "$CATEGORY_FILTER" ]] && echo "  Category: $CATEGORY_FILTER"
 [[ -n "$CONDITION_FILTER" ]] && echo "  Condition: $CONDITION_FILTER"
 [[ -n "$SCENARIO_FILTER" ]] && echo "  Scenario: $SCENARIO_FILTER"
@@ -374,6 +398,7 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
       -e "WRAPPER_FILE=$WRAPPER_NAME"
     )
     [[ -n "$MODEL_OVERRIDE" ]] && DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
+    append_ga_env
 
     docker run --rm --init --network "$NETWORK" \
       --memory 512m --cpus 1 --pids-limit 256 \
@@ -425,6 +450,7 @@ elif [[ "$PARALLEL" == "true" ]]; then
 
     bash "$SCRIPT_DIR/run-category.sh" \
       "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" "$RATE_LIMIT_DIR" \
+      "$GA_MODEL_OVERRIDE" "$GA_KEY_OVERRIDE" "$GA_ENDPOINT_OVERRIDE" "$GA_FORMAT_OVERRIDE" \
       > "$LOG_FILE" &
 
     WORKER_PIDS+=($!)
@@ -471,6 +497,7 @@ else
 
     bash "$SCRIPT_DIR/run-category.sh" \
       "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" "$RATE_LIMIT_DIR" \
+      "$GA_MODEL_OVERRIDE" "$GA_KEY_OVERRIDE" "$GA_ENDPOINT_OVERRIDE" "$GA_FORMAT_OVERRIDE" \
       || true
   done
 fi

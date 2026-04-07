@@ -9,12 +9,17 @@
 #   $2  MOCK_PORT       Port for this worker's mock server
 #   $3  RAW_DIR         Shared results directory (absolute path)
 #   $4  NETWORK         Docker network name
-#   $5  MODEL           Model override (optional)
+#   $5  MODEL           Agent model override (optional)
 #   $6  CONDITIONS      Comma-separated conditions (default: B,C)
 #   $7  WRAPPER_NAME    Wrapper file name (default: default)
+#   $8  RATE_LIMIT_DIR  Shared rate limiter directory
+#   $9  GA_MODEL        GA evaluator model override (optional)
+#   $10 GA_KEY          GA evaluator API key (optional)
+#   $11 GA_ENDPOINT     GA evaluator endpoint (optional)
+#   $12 GA_FORMAT       GA evaluator format (optional)
 #
 # Environment:
-#   ANTHROPIC_API_KEY   Required
+#   ANTHROPIC_API_KEY   Required (for agent model)
 
 set -euo pipefail
 
@@ -26,6 +31,10 @@ MODEL_OVERRIDE="${5:-}"
 CONDITION_LIST="${6:-A,B,C}"
 WRAPPER_NAME="${7:-default}"
 RATE_LIMIT_DIR="${8:-/tmp/ga-rate-limit}"
+GA_MODEL_OVERRIDE="${9:-}"
+GA_KEY_OVERRIDE="${10:-}"
+GA_ENDPOINT_OVERRIDE="${11:-}"
+GA_FORMAT_OVERRIDE="${12:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCK_CONTAINER="ga-mock-${CATEGORY_DIR}"
@@ -118,9 +127,11 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
       -e "MOCK_SERVER_URL=http://$MOCK_CONTAINER:9999"
       -e "WRAPPER_FILE=$WRAPPER_NAME"
     )
-    if [[ -n "$MODEL_OVERRIDE" ]]; then
-      DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
-    fi
+    [[ -n "$MODEL_OVERRIDE" ]]      && DOCKER_ENV+=(-e "MODEL=$MODEL_OVERRIDE")
+    [[ -n "$GA_MODEL_OVERRIDE" ]]   && DOCKER_ENV+=(-e "GA_MODEL=$GA_MODEL_OVERRIDE")
+    [[ -n "$GA_KEY_OVERRIDE" ]]     && DOCKER_ENV+=(-e "GA_API_KEY=$GA_KEY_OVERRIDE")
+    [[ -n "$GA_ENDPOINT_OVERRIDE" ]] && DOCKER_ENV+=(-e "GA_API_BASE=$GA_ENDPOINT_OVERRIDE")
+    [[ -n "$GA_FORMAT_OVERRIDE" ]]  && DOCKER_ENV+=(-e "GA_API_FORMAT=$GA_FORMAT_OVERRIDE")
 
     START_TIME=$SECONDS
     EXIT_CODE=0
