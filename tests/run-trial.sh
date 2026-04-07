@@ -111,6 +111,19 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
+# ── Auto-load GA model config from .ga-models.json if no overrides ──
+GA_MODELS_FILE="$HOME/.claude/hooks/.ga-models.json"
+if [[ -z "$GA_MODEL_OVERRIDE" && -f "$GA_MODELS_FILE" ]]; then
+  _ga_config=$(node -e "
+    const c = JSON.parse(require('fs').readFileSync('$GA_MODELS_FILE','utf8'));
+    const m = c.active && c.models?.[c.active];
+    if (m) console.log([m.model, m.key||'', m.endpoint||'', m.format||''].join('\n'));
+  " 2>/dev/null)
+  if [[ -n "$_ga_config" ]]; then
+    IFS=$'\n' read -rd '' GA_MODEL_OVERRIDE GA_KEY_OVERRIDE GA_ENDPOINT_OVERRIDE GA_FORMAT_OVERRIDE <<< "$_ga_config" || true
+  fi
+fi
+
 # ── Rerun-failures mode ───────────────────────────────────────────────
 if [[ -n "$RERUN_FAILURES" ]]; then
   # Resolve to absolute path
