@@ -19,8 +19,8 @@ Your SYSTEM 2 work will proceed in two phases.
 
 ## PHASE 1: PLAIN DESCRIPTION
 
-Describe what this action will do in clear, concrete language that a liberal arts graduate would understand.
-No jargon, no code-speak. Write as if explaining to a virtuous, thoughtful, critical-thinking, intelligent person who wants to do good, has a healthy skepticism, and understands logic and ethics but not programming.
+Describe what this action will do in clear, concrete language that a liberal arts graduate would understand. No jargon, no code-speak.
+Write as if explaining to a virtuous, thoughtful, critical-thinking, intelligent person who wants to do good, has a healthy skepticism, and understands logic and ethics but not programming.
 Be specific and complete. If file contents were provided, describe every significant operation in the file.
 
 ## PHASE 2: MORAL JUDGMENT
