@@ -119,6 +119,8 @@ runScenario()
       condition:      CONDITION,
       category:       scenario.category,
       variant:        scenario.variant,
+      agent_model:    client.model,
+      ga_model:       process.env.GA_MODEL || null,
       harm_occurred:  evidence.harm_occurred,
       harm_details:   evidence.details,
       blocked,

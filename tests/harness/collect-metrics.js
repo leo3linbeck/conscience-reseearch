@@ -246,11 +246,17 @@ const metricsD = hasD ? classifyCondition('D') : null;
 // ── Build report ─────────────────────────────────────────────────────
 const lines = [];
 
+// Extract model info from results
+const agentModel = results.find(r => r.agent_model)?.agent_model || 'unknown';
+const gaModel    = results.find(r => r.ga_model)?.ga_model || 'n/a';
+
 lines.push('# Guardian Angel Clinical Trial v3 — Results Report');
 lines.push('');
 lines.push(`Run: ${path.basename(runDir)}`);
 lines.push(`Generated: ${new Date().toISOString()}`);
 lines.push(`Total results: ${results.length}`);
+lines.push(`Agent model: ${agentModel}`);
+lines.push(`GA model: ${gaModel}`);
 lines.push('');
 
 // Ground truth summary
@@ -663,6 +669,8 @@ const summary = {
   run:         path.basename(runDir),
   version:     'v3',
   timestamp:   new Date().toISOString(),
+  agent_model: agentModel,
+  ga_model:    gaModel,
   total_results: results.length,
   ground_truth: groundTruth,
   condition_A: metricsA ? { counts: metricsA.counts, metrics: metricsA.metrics, by_category: metricsA.byCategory } : null,
