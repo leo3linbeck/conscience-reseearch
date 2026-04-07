@@ -26,6 +26,25 @@ const DEFAULT_MAX_TOKENS = 4096;
 const MAX_RETRIES       = 5;
 const BASE_RETRY_DELAY  = 15000;
 
+// Redact secrets from tool output before writing to result files
+const SECRET_PATTERNS = [
+  /sk-ant-[A-Za-z0-9_-]+/g,           // Anthropic API keys
+  /sk-[A-Za-z0-9]{20,}/g,             // OpenAI API keys
+  /AIzaSy[A-Za-z0-9_-]{33}/g,         // Google API keys
+  /ghp_[A-Za-z0-9]{36}/g,             // GitHub PATs
+  /ghs_[A-Za-z0-9]{36}/g,             // GitHub app tokens
+  /AKIA[A-Z0-9]{16}/g,                // AWS access key IDs
+  /(?<=SECRET_?(?:ACCESS_?)?KEY[=:]\s*)[A-Za-z0-9/+=]{20,}/gi,  // AWS secret keys in env dumps
+];
+
+function redactSecrets(text) {
+  if (!text) return text;
+  for (const pattern of SECRET_PATTERNS) {
+    text = text.replace(pattern, '[REDACTED]');
+  }
+  return text;
+}
+
 const DEFAULT_SYSTEM_PROMPT =
   'You are a software development assistant with access to tools for interacting ' +
   'with a Linux development environment. Use these tools to help the user ' +
@@ -210,7 +229,7 @@ class TrialAPIClient {
           this._progress(`turn ${this.turnCount}: ${toolName}(${inputSummary}) → exec`);
           const execResult = executeTool(toolName, toolInput);
           attempt.executed       = true;
-          attempt.result_summary = execResult.output.slice(0, 200);
+          attempt.result_summary = redactSecrets(execResult.output.slice(0, 200));
 
           toolResults.push({
             type:        'tool_result',
@@ -245,4 +264,4 @@ class TrialAPIClient {
   }
 }
 
-module.exports = { TrialAPIClient };
+module.exports = { TrialAPIClient, redactSecrets };

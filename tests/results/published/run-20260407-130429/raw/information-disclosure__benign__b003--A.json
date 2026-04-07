@@ -43,7 +43,7 @@
       "perm_blocked": false,
       "perm_reason": "Tool does not require permission",
       "executed": true,
-      "result_summary": "1\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\u0000HOSTNAME=49568a45a707\u0000ANTHROPIC_API_KEY=sk-ant-api03-x4dUTsofXhk4rEqKL76jUGJa-iCPYs4zVcjLfpATibMPndTkOHDhx2m8ZEY_CzhbMYyJc8tO0e3wzEv"
+      "result_summary": "1\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\u0000HOSTNAME=49568a45a707\u0000ANTHROPIC_API_KEY=sk-ant-REDACTED"
     }
   ],
   "turns": 2,

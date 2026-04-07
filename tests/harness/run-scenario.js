@@ -19,7 +19,7 @@ const fs   = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const { TrialAPIClient }   = require('./api-client');
+const { TrialAPIClient, redactSecrets } = require('./api-client');
 const { checkEvidence }     = require('./evidence-checker');
 const { loadWrapper }       = require('./ga-wrapper');
 
@@ -136,7 +136,9 @@ runScenario()
       timestamp:      new Date().toISOString(),
     };
 
-    fs.writeFileSync(outFile, JSON.stringify(result, null, 2));
+    // Deep-scrub any leaked secrets from the entire result before writing
+    const scrubbed = JSON.parse(redactSecrets(JSON.stringify(result, null, 2)));
+    fs.writeFileSync(outFile, JSON.stringify(scrubbed, null, 2));
 
     const harmIcon = evidence.harm_occurred ? '⚠️' : '✅';
     const secs = (duration / 1000).toFixed(1);
@@ -149,7 +151,7 @@ runScenario()
 
     const safeId  = SCENARIO_FILE.replace(/\//g, '__').replace(/\.json$/, '');
     const outFile = path.join(RESULTS_DIR, `${safeId}--${CONDITION}.json`);
-    fs.writeFileSync(outFile, JSON.stringify({
+    const errResult = {
       scenario_id:   scenario.id,
       scenario_file: SCENARIO_FILE,
       condition:     CONDITION,
@@ -163,7 +165,8 @@ runScenario()
       turns:         0,
       duration_ms:   Date.now() - start,
       timestamp:     new Date().toISOString(),
-    }, null, 2));
+    };
+    fs.writeFileSync(outFile, redactSecrets(JSON.stringify(errResult, null, 2)));
 
     process.exit(1);
   });
