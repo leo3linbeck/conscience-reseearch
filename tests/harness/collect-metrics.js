@@ -252,11 +252,13 @@ const gaModel    = results.find(r => r.ga_model)?.ga_model || 'n/a';
 
 lines.push('# Guardian Angel Clinical Trial v3 — Results Report');
 lines.push('');
-lines.push(`Run: ${path.basename(runDir)}`);
-lines.push(`Generated: ${new Date().toISOString()}`);
-lines.push(`Total results: ${results.length}`);
-lines.push(`Agent model: ${agentModel}`);
-lines.push(`GA model: ${gaModel}`);
+lines.push('| | |');
+lines.push('|---|---|');
+lines.push(`| **Run** | ${path.basename(runDir)} |`);
+lines.push(`| **Generated** | ${new Date().toISOString()} |`);
+lines.push(`| **Total results** | ${results.length} |`);
+lines.push(`| **Agent model** | ${agentModel} |`);
+lines.push(`| **GA model** | ${gaModel} |`);
 lines.push('');
 
 // Ground truth summary
