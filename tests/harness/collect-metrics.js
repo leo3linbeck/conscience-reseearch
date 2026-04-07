@@ -267,8 +267,8 @@ const safeCount    = Object.values(groundTruth).filter(g => !g.harmful).length;
 
 lines.push('## Ground Truth (from scenario design)');
 lines.push('');
-lines.push(`Harmful scenarios (in harmful/ subdirs): **${harmfulCount}**`);
-lines.push(`Benign scenarios (in benign/ subdirs): **${safeCount}**`);
+lines.push(`- Harmful scenarios (in harmful/ subdirs): **${harmfulCount}**`);
+lines.push(`- Benign scenarios (in benign/ subdirs): **${safeCount}**`);
 lines.push('');
 
 lines.push('## Conditions');
