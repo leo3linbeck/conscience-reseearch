@@ -483,23 +483,25 @@ if (gaCondColumns.length > 0) {
     }
   }
 
-  // Per-scenario table (includes total run time and GA % for C/D)
-  const gaTimeHeaders = gaCondColumns.map(c => `${c.label} Run Time | GA Total | GA % | S1 | S2 | Calls`).join(' | ');
+  // Per-scenario table (includes run times for A + C/D, and % increase over A)
+  const gaTimeHeaders = gaCondColumns.map(c => `${c.label} Run Time | GA Time | % Δ vs A | S1 | S2 | Calls`).join(' | ');
   const gaTimeDashes  = gaCondColumns.map(() => '---: | ---: | ---: | ---: | ---: | ---:').join(' | ');
-  lines.push(`| Scenario | ${gaTimeHeaders} |`);
-  lines.push(`|----------|${gaTimeDashes}|`);
+  lines.push(`| Scenario | A Run Time | ${gaTimeHeaders} |`);
+  lines.push(`|----------|---:|${gaTimeDashes}|`);
 
   for (const scenario of allScenarios) {
+    const aRunTime = scenarioMap[scenario]?.['A']?.duration_ms;
+    const aRunTimeStr = formatDuration(aRunTime);
     const cells = gaCondColumns.map(c => {
       const t = gaTimingData[scenario]?.[c.key];
       const r = scenarioMap[scenario]?.[c.key];
       const runTime = r?.duration_ms;
       const runTimeStr = formatDuration(runTime);
       if (!t) return `${runTimeStr} | — | — | — | — | —`;
-      const gaPct = (runTime && runTime > 0) ? ((t.total_ms / runTime) * 100).toFixed(1) + '%' : '—';
-      return `${runTimeStr} | ${formatDuration(t.total_ms)} | ${gaPct} | ${formatDuration(t.system1_ms)} | ${formatDuration(t.system2_ms)} | ${t.calls}`;
+      const deltaPct = (runTime && aRunTime && aRunTime > 0) ? (((runTime - aRunTime) / aRunTime) * 100).toFixed(1) + '%' : '—';
+      return `${runTimeStr} | ${formatDuration(t.total_ms)} | ${deltaPct} | ${formatDuration(t.system1_ms)} | ${formatDuration(t.system2_ms)} | ${t.calls}`;
     }).join(' | ');
-    lines.push(`| ${scenario} | ${cells} |`);
+    lines.push(`| ${scenario} | ${aRunTimeStr} | ${cells} |`);
   }
 
   // Aggregate stats per GA condition
@@ -507,9 +509,23 @@ if (gaCondColumns.length > 0) {
   lines.push('### GA Latency Summary');
   lines.push('');
 
+  // Compute condition A run time stats
+  const aRunTimes = [];
+  for (const scenario of allScenarios) {
+    const aTime = scenarioMap[scenario]?.['A']?.duration_ms;
+    if (aTime && aTime > 0) aRunTimes.push(aTime);
+  }
+  const statsHelper = (arr) => {
+    if (arr.length === 0) return { mean: 0, max: 0, min: 0, stddev: 0, sum: 0, count: 0 };
+    const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+    const variance = arr.reduce((a, b) => a + (b - mean) ** 2, 0) / arr.length;
+    return { mean, max: Math.max(...arr), min: Math.min(...arr), stddev: Math.sqrt(variance), sum: arr.reduce((a, b) => a + b, 0), count: arr.length };
+  };
+  const aRunTimeStats = statsHelper(aRunTimes);
+
   const gaStats = {};
   for (const col of gaCondColumns) {
-    const totals = [], s1s = [], s2s = [], callCounts = [], s1Only = [], s2Calls = [], runTimes = [], gaPcts = [];
+    const totals = [], s1s = [], s2s = [], callCounts = [], s1Only = [], s2Calls = [], runTimes = [], deltaPcts = [];
     for (const scenario of allScenarios) {
       const t = gaTimingData[scenario]?.[col.key];
       const r = scenarioMap[scenario]?.[col.key];
@@ -522,47 +538,44 @@ if (gaCondColumns.length > 0) {
       s2Calls.push(t.s2_calls || 0);
       if (r?.duration_ms && r.duration_ms > 0) {
         runTimes.push(r.duration_ms);
-        gaPcts.push((t.total_ms / r.duration_ms) * 100);
+        const aTime = scenarioMap[scenario]?.['A']?.duration_ms;
+        if (aTime && aTime > 0) {
+          deltaPcts.push(((r.duration_ms - aTime) / aTime) * 100);
+        }
       }
     }
-    const stats = (arr) => {
-      if (arr.length === 0) return { mean: 0, max: 0, min: 0, stddev: 0, sum: 0, count: 0 };
-      const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
-      const variance = arr.reduce((a, b) => a + (b - mean) ** 2, 0) / arr.length;
-      return { mean, max: Math.max(...arr), min: Math.min(...arr), stddev: Math.sqrt(variance), sum: arr.reduce((a, b) => a + b, 0), count: arr.length };
-    };
     gaStats[col.key] = {
-      total: stats(totals), system1: stats(s1s), system2: stats(s2s),
-      calls: stats(callCounts), s1Only: s1Only.reduce((a, b) => a + b, 0),
+      total: statsHelper(totals), system1: statsHelper(s1s), system2: statsHelper(s2s),
+      calls: statsHelper(callCounts), s1Only: s1Only.reduce((a, b) => a + b, 0),
       s2Calls: s2Calls.reduce((a, b) => a + b, 0),
-      runTime: stats(runTimes), gaPct: stats(gaPcts),
+      runTime: statsHelper(runTimes), deltaPct: statsHelper(deltaPcts),
     };
   }
 
-  const sumHeaders = gaCondColumns.map(c => c.label).join(' | ');
-  const sumDashes  = gaCondColumns.map(() => '---').join(' | ');
+  const sumHeaders = ['A (baseline)', ...gaCondColumns.map(c => c.label)].join(' | ');
+  const sumDashes  = ['---', ...gaCondColumns.map(() => '---')].join(' | ');
   lines.push(`| Metric | ${sumHeaders} |`);
   lines.push(`|--------|${sumDashes}|`);
 
-  function gaRow(label, getter) {
+  function gaRow(label, aVal, getter) {
     const vals = gaCondColumns.map(c => getter(gaStats[c.key]));
-    lines.push(`| ${label} | ${vals.join(' | ')} |`);
+    lines.push(`| ${label} | ${aVal} | ${vals.join(' | ')} |`);
   }
 
-  gaRow('**Total run time (sum)**', s => formatDuration(s.runTime.sum));
-  gaRow('**Mean run time / scenario**', s => formatDuration(s.runTime.mean));
-  gaRow('**Total GA time (sum)**', s => formatDuration(s.total.sum));
-  gaRow('**Mean GA time / scenario**', s => formatDuration(s.total.mean));
-  gaRow('**Mean GA % of run time**', s => s.gaPct.count > 0 ? s.gaPct.mean.toFixed(1) + '%' : '—');
-  gaRow('Max GA % of run time', s => s.gaPct.count > 0 ? s.gaPct.max.toFixed(1) + '%' : '—');
-  gaRow('Max GA time / scenario', s => formatDuration(s.total.max));
-  gaRow('Min GA time / scenario', s => formatDuration(s.total.min));
-  gaRow('Std Dev', s => formatDuration(s.total.stddev));
-  gaRow('Mean System 1 / scenario', s => formatDuration(s.system1.mean));
-  gaRow('Mean System 2 / scenario', s => formatDuration(s.system2.mean));
-  gaRow('Total S1-only resolutions', s => s.s1Only);
-  gaRow('Total S2 LLM calls', s => s.s2Calls);
-  gaRow('Mean GA calls / scenario', s => s.calls.mean.toFixed(1));
+  gaRow('**Total run time (sum)**', formatDuration(aRunTimeStats.sum), s => formatDuration(s.runTime.sum));
+  gaRow('**Mean run time / scenario**', formatDuration(aRunTimeStats.mean), s => formatDuration(s.runTime.mean));
+  gaRow('**Mean % Δ vs A**', '—', s => s.deltaPct.count > 0 ? s.deltaPct.mean.toFixed(1) + '%' : '—');
+  gaRow('Max % Δ vs A', '—', s => s.deltaPct.count > 0 ? s.deltaPct.max.toFixed(1) + '%' : '—');
+  gaRow('**Total GA time (sum)**', '—', s => formatDuration(s.total.sum));
+  gaRow('**Mean GA time / scenario**', '—', s => formatDuration(s.total.mean));
+  gaRow('Max GA time / scenario', '—', s => formatDuration(s.total.max));
+  gaRow('Min GA time / scenario', '—', s => formatDuration(s.total.min));
+  gaRow('Std Dev', '—', s => formatDuration(s.total.stddev));
+  gaRow('Mean System 1 / scenario', '—', s => formatDuration(s.system1.mean));
+  gaRow('Mean System 2 / scenario', '—', s => formatDuration(s.system2.mean));
+  gaRow('Total S1-only resolutions', '—', s => s.s1Only);
+  gaRow('Total S2 LLM calls', '—', s => s.s2Calls);
+  gaRow('Mean GA calls / scenario', '—', s => s.calls.mean.toFixed(1));
   lines.push('');
 }
 
@@ -656,7 +669,7 @@ const summary = {
   condition_B: metricsB ? { counts: metricsB.counts, metrics: metricsB.metrics, by_category: metricsB.byCategory } : null,
   condition_C: metricsC ? { counts: metricsC.counts, metrics: metricsC.metrics, by_category: metricsC.byCategory } : null,
   condition_D: metricsD ? { counts: metricsD.counts, metrics: metricsD.metrics, by_category: metricsD.byCategory } : null,
-  ga_timing: typeof gaStats !== 'undefined' ? gaStats : null,
+  ga_timing: typeof gaStats !== 'undefined' ? { ...gaStats, A_runTime: typeof aRunTimeStats !== 'undefined' ? aRunTimeStats : null } : null,
   model_interference: interferenceData,
   failures:    allFailures.map(f => ({
     scenario: f.scenario,
