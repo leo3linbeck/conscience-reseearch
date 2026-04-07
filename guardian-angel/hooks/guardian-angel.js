@@ -46,7 +46,7 @@ const LOG_FILE             = path.join(HOOK_DIR, 'guardian-angel.log');
 const PENDING_TIMEOUT_MS   = 300_000;  // 5 min — escalation awaits approval
 const APPROVAL_WINDOW_MS   = 30_000;   // 30s  — approved action window
 const SYSTEM2_API_TIMEOUT  = 12_000;   // 12s abort for LLM call
-const SYSTEM2_MODEL        = 'claude-haiku-4-5-20251001';
+const SYSTEM2_MODEL        = 'claude-haiku-4-5-20251001';  // fallback if no config
 
 // ── GA lib modules (installed by guardian-angel/install.js) ───────────
 const { resolveFileMetadata } = (() => {
@@ -463,46 +463,97 @@ function buildSystem2UserMessage(promptClass) {
   return sections.join('\n');
 }
 
-// Load API key from file or environment. Claude Code scrubs ANTHROPIC_API_KEY
-// from subprocess environments, so the hook reads from a dedicated key file.
+// Load model config from .ga-models.json, with fallback to legacy .ga-api-key.
+// Environment variables override config for Docker test containers.
+const GA_MODELS_PATH = path.join(HOOK_DIR, '.ga-models.json');
 const GA_API_KEY_PATH = path.join(HOOK_DIR, '.ga-api-key');
 
-function loadApiKey() {
-  // 1. Try environment (works in Docker test containers)
-  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
-  // 2. Try GA-specific env var
-  if (process.env.GA_API_KEY) return process.env.GA_API_KEY;
-  // 3. Try key file (production — survives env scrubbing)
-  try { return fs.readFileSync(GA_API_KEY_PATH, 'utf8').trim(); }
-  catch { return null; }
+function loadModelConfig() {
+  // 1. Environment overrides (Docker test containers)
+  if (process.env.ANTHROPIC_API_KEY || process.env.GA_API_KEY) {
+    return {
+      key:      process.env.GA_API_KEY || process.env.ANTHROPIC_API_KEY,
+      model:    process.env.GA_MODEL || SYSTEM2_MODEL,
+      endpoint: process.env.GA_API_BASE || 'https://api.anthropic.com',
+      format:   process.env.GA_API_FORMAT || 'anthropic',
+    };
+  }
+
+  // 2. Models config file (production)
+  try {
+    const config = JSON.parse(fs.readFileSync(GA_MODELS_PATH, 'utf8'));
+    const active = config.active && config.models?.[config.active];
+    if (active) {
+      return {
+        key:      active.key || null,
+        model:    active.model || SYSTEM2_MODEL,
+        endpoint: active.endpoint || 'https://api.anthropic.com',
+        format:   active.format || 'anthropic',
+      };
+    }
+  } catch { /* fall through */ }
+
+  // 3. Legacy key file
+  try {
+    const key = fs.readFileSync(GA_API_KEY_PATH, 'utf8').trim();
+    if (key) return { key, model: SYSTEM2_MODEL, endpoint: 'https://api.anthropic.com', format: 'anthropic' };
+  } catch { /* fall through */ }
+
+  return null;
 }
 
 async function invokeSystem2(promptClass) {
-  const apiKey = loadApiKey();
-  if (!apiKey) {
-    return { decision: 'ESCALATE', reason: 'System 2 unavailable: no API key (set ANTHROPIC_API_KEY or create ' + GA_API_KEY_PATH + ')', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+  const modelConfig = loadModelConfig();
+  if (!modelConfig || !modelConfig.key) {
+    return { decision: 'ESCALATE', reason: 'System 2 unavailable: no model configured (run install.js --add-model)', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
   }
 
+  const { key, model, endpoint, format } = modelConfig;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SYSTEM2_API_TIMEOUT);
+  const userMessage = buildSystem2UserMessage(promptClass);
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: SYSTEM2_MODEL,
-        max_tokens: 1024,
+    let response;
+
+    if (format === 'anthropic') {
+      response = await fetch(`${endpoint}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
         temperature: 0,
         system: SYSTEM2_PROMPT,
-        messages: [{ role: 'user', content: buildSystem2UserMessage(promptClass) }],
-      }),
-      signal: controller.signal,
-    });
+          messages: [{ role: 'user', content: userMessage }],
+        }),
+        signal: controller.signal,
+      });
+    } else {
+      // OpenAI-compatible (openai, ollama, together, vLLM, etc.)
+      const baseUrl = endpoint.replace(/\/+$/, '');
+      const isOllama = format === 'ollama' || baseUrl.includes('11434') || baseUrl.includes('ollama');
+      const url = isOllama ? `${baseUrl}/api/chat` : `${baseUrl}/v1/chat/completions`;
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (key) headers['Authorization'] = `Bearer ${key}`;
+
+      const body = {
+        model,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: SYSTEM2_PROMPT },
+          { role: 'user', content: userMessage },
+        ],
+      };
+      if (!isOllama) body.max_tokens = 512;
+
+      response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
+    }
 
     clearTimeout(timeout);
 
@@ -511,22 +562,27 @@ async function invokeSystem2(promptClass) {
     }
 
     const result = await response.json();
-    return parseSystem2Response(result);
+    return parseSystem2Response(result, format);
   } catch (err) {
     clearTimeout(timeout);
     return { decision: 'ESCALATE', reason: `System 2 error: ${err.message}`, gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
   }
 }
 
-function parseSystem2Response(apiResult) {
+function parseSystem2Response(apiResult, format) {
   try {
-    const text = apiResult.content[0].text;
-    // Response may contain chain-of-thought before JSON — extract the JSON object
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { decision: 'ESCALATE', reason: 'System 2: no JSON found in response', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    let text;
+    if (format === 'anthropic' || apiResult.content) {
+      text = apiResult.content[0].text;
+    } else if (apiResult.message?.content) {
+      text = apiResult.message.content;        // Ollama
+    } else if (apiResult.choices?.[0]?.message?.content) {
+      text = apiResult.choices[0].message.content; // OpenAI
+    } else {
+      return { decision: 'ESCALATE', reason: 'System 2: unexpected response format', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
     }
-    const parsed = JSON.parse(jsonMatch[0]);
+    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(cleaned);
 
     const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK']);
     if (!validDecisions.has(parsed.decision)) {

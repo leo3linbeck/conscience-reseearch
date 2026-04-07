@@ -22,23 +22,36 @@ const MAX_FILE_SIZE   = 10_000;
 const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
 
 // ── LLM Backend Configuration ────────────────────────────────────────
-// GA can use any OpenAI-compatible API. Configure via environment:
-//   GA_API_BASE    — API base URL (default: Anthropic)
-//   GA_API_KEY     — API key (default: ANTHROPIC_API_KEY)
-//   GA_MODEL       — Model ID
-//   GA_API_FORMAT  — 'anthropic' or 'openai' (default: auto-detect from URL)
+// GA can use any OpenAI-compatible API. Configure via:
+//   1. Environment variables (override everything — for Docker test containers):
+//      GA_API_BASE, GA_API_KEY, GA_MODEL, GA_API_FORMAT
+//   2. ~/.claude/hooks/.ga-models.json (active profile — for production)
+//   3. Defaults (Anthropic)
 //
-// Examples:
+// Examples (env):
 //   Anthropic:  GA_API_BASE=https://api.anthropic.com  GA_MODEL=claude-haiku-4-5-20251001
 //   OpenAI:     GA_API_BASE=https://api.openai.com     GA_MODEL=gpt-4o-mini
 //   Ollama:     GA_API_BASE=http://localhost:11434      GA_MODEL=llama3
 //   Together:   GA_API_BASE=https://api.together.xyz    GA_MODEL=meta-llama/Llama-3-8b-chat-hf
 
-const GA_API_BASE = process.env.GA_API_BASE || 'https://api.anthropic.com';
+function loadModelsConfig() {
+  const modelsPath = path.join(require('os').homedir(), '.claude', 'hooks', '.ga-models.json');
+  try {
+    const config = JSON.parse(fs.readFileSync(modelsPath, 'utf8'));
+    const active = config.active && config.models?.[config.active];
+    if (active) return active;
+  } catch { /* not available */ }
+  return null;
+}
+
+const _modelsConfig = (!process.env.GA_API_BASE && !process.env.GA_MODEL) ? loadModelsConfig() : null;
+
+const GA_API_BASE = process.env.GA_API_BASE || _modelsConfig?.endpoint || 'https://api.anthropic.com';
 
 function detectApiFormat() {
   const explicit = process.env.GA_API_FORMAT;
   if (explicit) return explicit;
+  if (_modelsConfig?.format) return _modelsConfig.format;
   if (GA_API_BASE.includes('anthropic.com')) return 'anthropic';
   return 'openai';
 }
@@ -414,7 +427,7 @@ function readFileSafe(filePath) {
  * @returns {Promise<string>} The raw text response
  */
 async function callLLM(systemPrompt, userMessage, model, apiKey) {
-  const gaApiKey = process.env.GA_API_KEY || apiKey;
+  const gaApiKey = process.env.GA_API_KEY || apiKey || _modelsConfig?.key;
 
   if (GA_API_FORMAT === 'anthropic') {
     return callAnthropic(systemPrompt, userMessage, model, gaApiKey);
@@ -528,7 +541,7 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   }
 
   const s1_ms = Date.now() - t0;
-  const model = opts.model || process.env.GA_MODEL || DEFAULT_MODEL;
+  const model = opts.model || process.env.GA_MODEL || _modelsConfig?.model || DEFAULT_MODEL;
 
   // ── Script resolution ────────────────────────────────────────────
   const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);

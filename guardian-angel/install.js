@@ -9,14 +9,20 @@
  *   node guardian-angel/install.js                      # install/update
  *   node guardian-angel/install.js --dry-run             # show what would be installed
  *   node guardian-angel/install.js --diff                # show what differs
- *   node guardian-angel/install.js --set-key sk-ant-...  # save API key for System 2
+ *   node guardian-angel/install.js --set-key sk-ant-...  # save API key (legacy)
  *
- * First-time setup (run from your terminal, not from Claude Code):
- *   node guardian-angel/install.js --set-key $ANTHROPIC_API_KEY
+ * Model management:
+ *   node guardian-angel/install.js --add-model           # interactive: add a model profile
+ *   node guardian-angel/install.js --add-model --name haiku --model claude-haiku-4-5-20251001 --key sk-ant-...
+ *   node guardian-angel/install.js --add-model --name llama --model llama3:70b --endpoint http://localhost:11434
+ *   node guardian-angel/install.js --list-models          # show all profiles
+ *   node guardian-angel/install.js --use-model sonnet     # switch active model
+ *   node guardian-angel/install.js --remove-model old     # remove a profile
  *
  * What gets installed:
  *   ~/.claude/hooks/guardian-angel.js        — the hook (System 1 + System 2)
  *   ~/.claude/hooks/ga-system2-prompt.txt    — the evaluation prompt (Phase 2)
+ *   ~/.claude/hooks/.ga-models.json          — model profiles (endpoint, key, format)
  *   ~/.claude/hooks/ga-lib/                  — shared modules
  *     file-metadata.js                       — git status, sensitive patterns
  *     file-resolver.js                       — reads scripts for DAG flattening
@@ -37,9 +43,65 @@ const HOOKS_DIR     = path.join(os.homedir(), '.claude', 'hooks');
 const GA_LIB_DIR    = path.join(HOOKS_DIR, 'ga-lib');
 const TEMPLATE_PATH = path.join(__dirname, 'hooks', 'guardian-angel.template.js');
 
-const DRY_RUN   = process.argv.includes('--dry-run');
-const SHOW_DIFF = process.argv.includes('--diff');
-const SET_KEY   = process.argv.includes('--set-key');
+const DRY_RUN      = process.argv.includes('--dry-run');
+const SHOW_DIFF    = process.argv.includes('--diff');
+const SET_KEY      = process.argv.includes('--set-key');
+const ADD_MODEL    = process.argv.includes('--add-model');
+const LIST_MODELS  = process.argv.includes('--list-models');
+const USE_MODEL    = process.argv.includes('--use-model');
+const REMOVE_MODEL = process.argv.includes('--remove-model');
+
+// ── Model config file ────────────────────────────────────────────────
+const MODELS_PATH  = path.join(HOOKS_DIR, '.ga-models.json');
+const LEGACY_KEY   = path.join(HOOKS_DIR, '.ga-api-key');
+
+function loadModelsConfig() {
+  if (fs.existsSync(MODELS_PATH)) {
+    try { return JSON.parse(fs.readFileSync(MODELS_PATH, 'utf8')); }
+    catch { /* fall through */ }
+  }
+  return { active: null, models: {} };
+}
+
+function saveModelsConfig(config) {
+  fs.mkdirSync(HOOKS_DIR, { recursive: true });
+  fs.writeFileSync(MODELS_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
+}
+
+function migrateFromLegacyKey() {
+  if (fs.existsSync(LEGACY_KEY) && !fs.existsSync(MODELS_PATH)) {
+    const key = fs.readFileSync(LEGACY_KEY, 'utf8').trim();
+    if (key) {
+      const config = {
+        active: 'haiku',
+        models: {
+          haiku: {
+            model: 'claude-haiku-4-5-20251001',
+            endpoint: 'https://api.anthropic.com',
+            format: 'anthropic',
+            key,
+          },
+        },
+      };
+      saveModelsConfig(config);
+      console.log('  ✓ Migrated .ga-api-key → .ga-models.json (profile: "haiku")');
+      return config;
+    }
+  }
+  return null;
+}
+
+function getArg(flag) {
+  const idx = process.argv.indexOf(flag);
+  return (idx !== -1 && idx + 1 < process.argv.length) ? process.argv[idx + 1] : null;
+}
+
+function detectFormat(endpoint) {
+  if (!endpoint) return 'anthropic';
+  if (endpoint.includes('anthropic.com')) return 'anthropic';
+  if (endpoint.includes('11434') || endpoint.includes('ollama')) return 'ollama';
+  return 'openai';
+}
 
 // ── Source paths ─────────────────────────────────────────────────────
 const WRAPPER_SRC  = path.join(REPO_ROOT, 'tests', 'wrappers', 'default.txt');
@@ -390,27 +452,172 @@ const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
 
 // ── Install ──────────────────────────────────────────────────────────
 
-// ── Set API key command ──────────────────────────────────────────────
+// ── Set API key command (legacy — still works, migrates to models config) ──
 if (SET_KEY) {
-  const keyFilePath = path.join(HOOKS_DIR, '.ga-api-key');
-  const keyArg = process.argv[process.argv.indexOf('--set-key') + 1];
+  const keyArg = getArg('--set-key');
+  const key = (keyArg && !keyArg.startsWith('-')) ? keyArg : process.env.ANTHROPIC_API_KEY;
 
-  if (keyArg && keyArg.startsWith('sk-')) {
-    // Key provided as argument
-    fs.mkdirSync(HOOKS_DIR, { recursive: true });
-    fs.writeFileSync(keyFilePath, keyArg, { mode: 0o600 });
-    console.log(`API key saved to ${keyFilePath}`);
-  } else if (process.env.ANTHROPIC_API_KEY) {
-    // Key from environment
-    fs.mkdirSync(HOOKS_DIR, { recursive: true });
-    fs.writeFileSync(keyFilePath, process.env.ANTHROPIC_API_KEY, { mode: 0o600 });
-    console.log(`API key saved to ${keyFilePath} (from ANTHROPIC_API_KEY env)`);
-  } else {
+  if (!key) {
     console.error('Usage: node install.js --set-key sk-ant-your-key-here');
     console.error('   or: ANTHROPIC_API_KEY=sk-ant-... node install.js --set-key');
     process.exit(1);
   }
+
+  // Write legacy file for backward compat
+  fs.mkdirSync(HOOKS_DIR, { recursive: true });
+  fs.writeFileSync(LEGACY_KEY, key, { mode: 0o600 });
+
+  // Also add/update in models config
+  const config = loadModelsConfig();
+  if (!config.models.haiku) {
+    config.models.haiku = {
+      model: 'claude-haiku-4-5-20251001',
+      endpoint: 'https://api.anthropic.com',
+      format: 'anthropic',
+      key,
+    };
+  } else {
+    config.models.haiku.key = key;
+  }
+  if (!config.active) config.active = 'haiku';
+  saveModelsConfig(config);
+  console.log(`API key saved (profile: "haiku")`);
   process.exit(0);
+}
+
+// ── Model management commands ────────────────────────────────────────
+
+if (LIST_MODELS) {
+  migrateFromLegacyKey();
+  const config = loadModelsConfig();
+  const names = Object.keys(config.models);
+  if (names.length === 0) {
+    console.log('No models configured. Use --add-model to add one.');
+    process.exit(0);
+  }
+  console.log('Guardian Angel — Model Profiles\n');
+  for (const name of names) {
+    const m = config.models[name];
+    const active = name === config.active ? ' ← active' : '';
+    const keyPreview = m.key ? m.key.slice(0, 12) + '...' : '(none)';
+    console.log(`  ${name}${active}`);
+    console.log(`    model:    ${m.model}`);
+    console.log(`    endpoint: ${m.endpoint}`);
+    console.log(`    format:   ${m.format}`);
+    console.log(`    key:      ${keyPreview}`);
+    console.log('');
+  }
+  process.exit(0);
+}
+
+if (USE_MODEL) {
+  migrateFromLegacyKey();
+  const name = getArg('--use-model');
+  if (!name) { console.error('Usage: node install.js --use-model <name>'); process.exit(1); }
+  const config = loadModelsConfig();
+  if (!config.models[name]) {
+    console.error(`Model "${name}" not found. Available: ${Object.keys(config.models).join(', ')}`);
+    process.exit(1);
+  }
+  config.active = name;
+  saveModelsConfig(config);
+  console.log(`Active model set to "${name}" (${config.models[name].model})`);
+  process.exit(0);
+}
+
+if (REMOVE_MODEL) {
+  const name = getArg('--remove-model');
+  if (!name) { console.error('Usage: node install.js --remove-model <name>'); process.exit(1); }
+  const config = loadModelsConfig();
+  if (!config.models[name]) {
+    console.error(`Model "${name}" not found.`);
+    process.exit(1);
+  }
+  delete config.models[name];
+  if (config.active === name) {
+    const remaining = Object.keys(config.models);
+    config.active = remaining.length > 0 ? remaining[0] : null;
+    if (config.active) console.log(`Active model switched to "${config.active}"`);
+  }
+  saveModelsConfig(config);
+  console.log(`Removed model "${name}"`);
+  process.exit(0);
+}
+
+if (ADD_MODEL) {
+  migrateFromLegacyKey();
+
+  // Check for non-interactive mode: --name, --model, --key, --endpoint all provided as args
+  const argName     = getArg('--name');
+  const argModel    = getArg('--model');
+  const argKey      = getArg('--key');
+  const argEndpoint = getArg('--endpoint');
+  const argFormat   = getArg('--format');
+
+  if (argName && argModel) {
+    // Non-interactive
+    const endpoint = argEndpoint || 'https://api.anthropic.com';
+    const format   = argFormat || detectFormat(endpoint);
+    const config   = loadModelsConfig();
+    config.models[argName] = { model: argModel, endpoint, format, key: argKey || null };
+    if (!config.active) config.active = argName;
+    saveModelsConfig(config);
+    console.log(`Added model "${argName}" (${argModel})`);
+    if (config.active === argName) console.log(`  → set as active`);
+    process.exit(0);
+  }
+
+  // Interactive mode
+  const readline = require('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q) => new Promise(resolve => rl.question(q, resolve));
+
+  (async () => {
+    console.log('Guardian Angel — Add Model Profile\n');
+
+    const config = loadModelsConfig();
+    const existing = Object.keys(config.models);
+    if (existing.length > 0) console.log(`Existing profiles: ${existing.join(', ')}\n`);
+
+    const name = (await ask('Profile name (e.g. haiku, sonnet, llama-local): ')).trim();
+    if (!name) { console.error('Name required.'); process.exit(1); }
+    if (config.models[name]) {
+      const overwrite = (await ask(`"${name}" already exists. Overwrite? (y/N): `)).trim().toLowerCase();
+      if (overwrite !== 'y') { console.log('Cancelled.'); process.exit(0); }
+    }
+
+    const model = (await ask('Model ID (e.g. claude-haiku-4-5-20251001): ')).trim();
+    if (!model) { console.error('Model ID required.'); process.exit(1); }
+
+    const endpointInput = (await ask('API endpoint (press Enter for https://api.anthropic.com): ')).trim();
+    const endpoint = endpointInput || 'https://api.anthropic.com';
+
+    const detectedFormat = detectFormat(endpoint);
+    const formatInput = (await ask(`API format (press Enter for ${detectedFormat}): `)).trim();
+    const format = formatInput || detectedFormat;
+
+    const key = (await ask('API key (press Enter for none): ')).trim() || null;
+
+    rl.close();
+
+    config.models[name] = { model, endpoint, format, key };
+
+    if (!config.active || existing.length === 0) {
+      config.active = name;
+      console.log(`\n  → Set as active model`);
+    } else {
+      const setActive = (await new Promise(resolve => {
+        const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl2.question(`Set "${name}" as active model? (y/N): `, answer => { rl2.close(); resolve(answer); });
+      })).trim().toLowerCase();
+      if (setActive === 'y') config.active = name;
+    }
+
+    saveModelsConfig(config);
+    console.log(`\n✓ Model "${name}" saved.`);
+  })().catch(err => { console.error(err.message); process.exit(1); });
+
+  return; // prevent falling through to install()
 }
 
 // ── Main install ─────────────────────────────────────────────────────
@@ -457,57 +664,68 @@ async function install() {
     console.log(`  ✓ updated: ${REPO_HOOK}`);
   }
 
-  // Verify API key file for System 2
-  const keyFilePath = path.join(HOOKS_DIR, '.ga-api-key');
+  // Verify model config for System 2
   if (!DRY_RUN && !SHOW_DIFF) {
-    let keyValid = false;
+    // Migrate legacy key file if needed
+    migrateFromLegacyKey();
 
-    // Check if key file exists and has content
-    if (fs.existsSync(keyFilePath)) {
-      const key = fs.readFileSync(keyFilePath, 'utf8').trim();
-      if (key && key.startsWith('sk-')) {
-        console.log(`  ✓ API key file: ${keyFilePath}`);
-        keyValid = true;
-      }
-    }
+    let config = loadModelsConfig();
+    const hasModels = Object.keys(config.models).length > 0;
+    const activeModel = config.active && config.models[config.active];
 
-    if (!keyValid) {
-      // Try to get key from environment
+    if (hasModels && activeModel) {
+      const keyPreview = activeModel.key ? activeModel.key.slice(0, 12) + '...' : '(none)';
+      console.log(`  ✓ Active model: "${config.active}" (${activeModel.model}, key: ${keyPreview})`);
+    } else if (!hasModels) {
+      // No models configured — try environment, then prompt
       const envKey = process.env.ANTHROPIC_API_KEY;
-      if (envKey && envKey.startsWith('sk-')) {
-        fs.writeFileSync(keyFilePath, envKey, { mode: 0o600 });
-        console.log(`  ✓ created: ${keyFilePath} (from ANTHROPIC_API_KEY env)`);
-        keyValid = true;
-      }
-    }
+      if (envKey) {
+        config.models.haiku = {
+          model: 'claude-haiku-4-5-20251001',
+          endpoint: 'https://api.anthropic.com',
+          format: 'anthropic',
+          key: envKey,
+        };
+        config.active = 'haiku';
+        saveModelsConfig(config);
+        // Also write legacy key for backward compat
+        fs.writeFileSync(LEGACY_KEY, envKey, { mode: 0o600 });
+        console.log(`  ✓ Model config created from ANTHROPIC_API_KEY (profile: "haiku")`);
+      } else {
+        console.log('');
+        console.log('  Guardian Angel System 2 requires an API key.');
+        console.log('  Claude Code scrubs API keys from hook environments,');
+        console.log('  so the key must be stored in a config file.');
+        console.log('');
 
-    if (!keyValid) {
-      // Prompt user for key
-      console.log('');
-      console.log('  Guardian Angel System 2 requires an Anthropic API key.');
-      console.log('  Claude Code scrubs API keys from hook environments,');
-      console.log('  so the key must be stored in a file.');
-      console.log('');
+        const readline = require('readline');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-      const readline = require('readline');
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-      await new Promise((resolve) => {
-        rl.question('  Enter your Anthropic API key (sk-ant-...): ', (answer) => {
-          rl.close();
-          const key = answer.trim();
-          if (key && key.startsWith('sk-')) {
-            fs.writeFileSync(keyFilePath, key, { mode: 0o600 });
-            console.log(`  ✓ created: ${keyFilePath}`);
-            resolve();
-          } else {
-            console.error('');
-            console.error('  ✗ Invalid key. Installation cannot complete without an API key.');
-            console.error('    Re-run install, or use: node install.js --set-key sk-ant-...');
-            process.exit(1);
-          }
+        await new Promise((resolve) => {
+          rl.question('  Enter your API key: ', (answer) => {
+            rl.close();
+            const key = answer.trim();
+            if (key) {
+              config.models.haiku = {
+                model: 'claude-haiku-4-5-20251001',
+                endpoint: 'https://api.anthropic.com',
+                format: 'anthropic',
+                key,
+              };
+              config.active = 'haiku';
+              saveModelsConfig(config);
+              fs.writeFileSync(LEGACY_KEY, key, { mode: 0o600 });
+              console.log(`  ✓ Model config created (profile: "haiku")`);
+              resolve();
+            } else {
+              console.error('');
+              console.error('  ✗ No key provided. System 2 will be unavailable.');
+              console.error('    Use: node install.js --add-model to configure later.');
+              resolve();
+            }
+          });
         });
-      });
+      }
     }
   }
 
