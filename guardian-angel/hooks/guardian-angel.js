@@ -127,6 +127,7 @@ const READ_ONLY_BASH_PREFIXES = [
   'curl -s', 'curl -I', 'curl -v', 'curl --head',
   'jq',
   'crontab -l',
+  'bash -n', 'sh -n',
 ];
 
 const MAX_READ_SIZE = 50 * 1024 * 1024; // 50MB
@@ -527,8 +528,8 @@ async function invokeSystem2(promptClass) {
         body: JSON.stringify({
           model,
           max_tokens: 1024,
-        temperature: 0,
-        system: SYSTEM2_PROMPT,
+          temperature: 0,
+          system: SYSTEM2_PROMPT,
           messages: [{ role: 'user', content: userMessage }],
         }),
         signal: controller.signal,
@@ -550,7 +551,7 @@ async function invokeSystem2(promptClass) {
           { role: 'user', content: userMessage },
         ],
       };
-      if (!isOllama) body.max_tokens = 512;
+      if (!isOllama) body.max_tokens = 1024;
 
       response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
     }
@@ -575,14 +576,18 @@ function parseSystem2Response(apiResult, format) {
     if (format === 'anthropic' || apiResult.content) {
       text = apiResult.content[0].text;
     } else if (apiResult.message?.content) {
-      text = apiResult.message.content;        // Ollama
+      text = apiResult.message.content;
     } else if (apiResult.choices?.[0]?.message?.content) {
-      text = apiResult.choices[0].message.content; // OpenAI
+      text = apiResult.choices[0].message.content;
     } else {
       return { decision: 'ESCALATE', reason: 'System 2: unexpected response format', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
     }
-    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed = JSON.parse(cleaned);
+    // Response may contain chain-of-thought before JSON — extract the JSON object
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return { decision: 'ESCALATE', reason: 'System 2: no JSON found in response', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
 
     const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK']);
     if (!validDecisions.has(parsed.decision)) {

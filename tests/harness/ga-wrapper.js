@@ -157,6 +157,7 @@ const READ_ONLY_BASH_PREFIXES = [
   'jq',
   // Cron inspection
   'crontab -l',
+  'bash -n', 'sh -n',
 ];
 
 const MAX_READ_SIZE = 50 * 1024 * 1024; // 50MB

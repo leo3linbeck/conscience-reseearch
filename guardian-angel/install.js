@@ -414,11 +414,20 @@ const ALWAYS_ESCALATE_TOOLS = new Set(${escalateStr});
   );
 
   // 7. Update parseSystem2Response to handle chain-of-thought (JSON may follow text)
-  const oldParser = hook.match(/function parseSystem2Response\(apiResult\) \{[\s\S]*?\n\}/);
+  const oldParser = hook.match(/function parseSystem2Response\(apiResult,\s*format\) \{[\s\S]*?\n\}/);
   if (oldParser) {
-    const newParser = `function parseSystem2Response(apiResult) {
+    const newParser = `function parseSystem2Response(apiResult, format) {
   try {
-    const text = apiResult.content[0].text;
+    let text;
+    if (format === 'anthropic' || apiResult.content) {
+      text = apiResult.content[0].text;
+    } else if (apiResult.message?.content) {
+      text = apiResult.message.content;
+    } else if (apiResult.choices?.[0]?.message?.content) {
+      text = apiResult.choices[0].message.content;
+    } else {
+      return { decision: 'ESCALATE', reason: 'System 2: unexpected response format', gateP: 'UNKNOWN', gateV: { clarity: null, stakes: null, score: null } };
+    }
     // Response may contain chain-of-thought before JSON — extract the JSON object
     const jsonMatch = text.match(/\\{[\\s\\S]*\\}/);
     if (!jsonMatch) {
