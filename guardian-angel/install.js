@@ -31,7 +31,7 @@
  *   ~/.claude/hooks/ga-system2-prompt.txt    — System 2 moral reasoning prompt       (optimizable)
  *   ~/.claude/hooks/.ga-models.json          — System 2 model profiles + System 1 settings
  *   ~/.claude/hooks/ga-lib/
- *     system0.js                             — reflex: safe patterns, flinch patterns, file metadata
+ *     system0.js                             — reflex: approve / reject patterns, escalation flags, file metadata
  *     system1.js                             — intuition: jev client, redaction, convergence policy
  *     context.js                             — script resolution (DAG flattening), System 2 message
  *
@@ -133,8 +133,8 @@ function describeSystem1(config) {
   const s1 = config.system1 || {};
   const keyPreview = s1.key ? s1.key.slice(0, 6) + '...' : '(none)';
   const mode = s1.mode || 'enforce';
-  const note = !s1.key ? ' — no key: every call defers to System 2'
-             : mode === 'shadow' ? ' — advisory only: consulted and logged, never approves'
+  const note = !s1.key ? ' — no key: every call escalates to System 2'
+             : mode === 'shadow' ? ' — advisory only: consulted and logged, verdict not acted on'
              : mode === 'off' ? ' — skipped' : '';
   return `jev via TypeSafe (mode: ${mode}, key: ${keyPreview})${note}`;
 }

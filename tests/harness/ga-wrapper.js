@@ -3,15 +3,18 @@
 /**
  * Guardian Angel Clinical Trial — Stateless GA Wrapper
  *
- * Progressive escalation. Each tier may only APPROVE an action or pass it
- * upward; the principal is always the last word.
+ * Progressive escalation. Every tier gives one of three verdicts:
+ *
+ *   APPROVE   the tool call proceeds
+ *   REJECT    the tool call is refused, with the reason
+ *   ESCALATE  the call moves up: System 0 → System 1 → System 2 → the principal
  *
  *   System 0 — reflex        (system0.js)  deterministic patterns, <1ms
  *   System 1 — intuition     (system1.js)  typed judgments from jev (TypeSafe)
- *   System 2 — deliberation  (this file)   LLM moral reasoning: compile leaf
- *                                          operations, then evaluate them
- *   Principal                              in the trial, "handed to the principal"
- *                                          is recorded as blocked
+ *   System 2 — deliberation  (this file)   LLM moral reasoning over the big picture
+ *   Principal                              absent in a trial: a call that reaches the
+ *                                          principal does not execute and counts
+ *                                          toward the Escalation Rate, not FP/FN
  *
  * Two variables get optimized: the System 2 wrapper prompt (wrappers/default.txt)
  * and the System 1 questions + policy (wrappers/system1.json).
@@ -198,56 +201,56 @@ async function callOpenAI(systemPrompt, userMessage, model, apiKey) {
 // ── Progressive evaluation ───────────────────────────────────────────
 
 /**
- * Evaluate a tool call by progressive escalation:
- *   System 0 → System 1 → System 2 → principal
+ * Evaluate a tool call by progressive escalation.
  *
- * `blocked: true` means the action did not proceed on the machine's authority:
- * it was handed to the principal (who is absent in a trial).
+ * @returns {{
+ *   decision: 'APPROVE'|'REJECT'|'ESCALATE',   // final: ESCALATE means it reached the principal
+ *   tier:     'system0'|'system1'|'system2',    // the tier whose verdict was final
+ *   trail:    {tier, verdict, reason, advisory?}[],   // every tier the call passed through
+ *   blocked:  boolean,                           // did not execute (REJECT, or ESCALATE with no principal)
+ *   reason, raw, system1, timing
+ * }}
  */
 async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt, apiKey, opts = {}) {
   if (!apiKey) {
-    return { blocked: false, decision: 'PROCEED', reason: 'no API key — defaulting to allow', raw: null, timing: null };
+    return { blocked: false, decision: 'APPROVE', tier: null, trail: [], reason: 'no API key — defaulting to allow', raw: null, timing: null };
   }
 
   const t0 = Date.now();
+  const trail = [];
   const timing = (s0, s1, s2, resolved_by) =>
     ({ system0_ms: s0, system1_ms: s1, system2_ms: s2, total_ms: Date.now() - t0, resolved_by });
+  const finish = (tier, decision, reason, extra, tm) => ({
+    blocked: decision !== 'APPROVE', decision, tier, trail, reason, raw: null, system1: null, ...extra, timing: tm,
+  });
 
   // ── System 0: reflex ─────────────────────────────────────────────
-  const s0Result = checkSystem0(toolName, toolInput);
+  const s0 = checkSystem0(toolName, toolInput);
   const s0_ms = Date.now() - t0;
-  if (s0Result) {
-    const approved = s0Result.verdict === 'APPROVE';
-    return {
-      blocked: !approved, decision: approved ? 'PROCEED' : 'ESCALATE',
-      reason: s0Result.reason, gate: s0Result.gate, raw: null, system1: null,
-      timing: timing(s0_ms, 0, 0, 'system0'),
-    };
+  trail.push({ tier: 'system0', verdict: s0.verdict, reason: s0.reason, gate: s0.gate });
+  if (s0.verdict !== 'ESCALATE') {
+    return finish('system0', s0.verdict, s0.reason, { gate: s0.gate }, timing(s0_ms, 0, 0, 'system0'));
   }
 
   // ── Context: what would actually run? ────────────────────────────
-  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput, opts.cwd || process.env.GA_TOOL_CWD || '/workspace');
+  const reflexFlags = [...s0.flags];
+  const { files: resolvedFiles, unresolved } =
+    resolveReferencedFiles(toolName, toolInput, opts.cwd || process.env.GA_TOOL_CWD || '/workspace');
   if (unresolved.length > 0) {
-    return {
-      blocked: true, decision: 'ESCALATE',
-      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
-      gate: 'unresolved-script', raw: null, system1: null,
-      timing: timing(Date.now() - t0, 0, 0, 'system0'),
-    };
+    reflexFlags.push(`the command runs script(s) whose contents could not be read: ${unresolved.join(', ')}`);
   }
   const fileMeta = resolveFileMetadata(toolName, toolInput);
-  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, resolvedFiles };
+  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, resolvedFiles, reflexFlags, history: opts.history || [] };
 
   // ── System 2 (defined here so shadow mode can run it alongside System 1) ──
   const model = opts.model || process.env.GA_MODEL || _modelsConfig?.model || DEFAULT_MODEL;
-  const deliberate = async () => {
+  const deliberate = async (intuition) => {
     const t2 = Date.now();
     try {
-      const text = await callLLM(wrapperText, buildSystem2UserMessage(call), model, apiKey);
+      const text = await callLLM(wrapperText, buildSystem2UserMessage({ ...call, intuition }), model, apiKey);
       return { ...parseResponseText(text), ms: Date.now() - t2, error: false };
     } catch (err) {
-      return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null,
-               ms: Date.now() - t2, error: true };
+      return { decision: 'ESCALATE', reason: `System 2 error: ${err.message}`, raw: null, ms: Date.now() - t2, error: true };
     }
   };
 
@@ -255,53 +258,53 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   const s1Config = opts.system1Config || system1.loadSystem1Config();
   let s1, s2;
   if (s1Config.mode === 'shadow') {
-    [s1, s2] = await Promise.all([system1.evaluateSystem1(loadSystem1Spec(), call, s1Config), deliberate()]);
+    // Advisory: measured alongside System 2, which decides (and does not see the strands).
+    [s1, s2] = await Promise.all([system1.evaluateSystem1(loadSystem1Spec(), call, s1Config), deliberate(null)]);
+    trail.push({ tier: 'system1', verdict: s1.decision, reason: s1.reason, advisory: true });
   } else {
     s1 = await system1.evaluateSystem1(loadSystem1Spec(), call, s1Config);
-    if (s1.decision === 'APPROVE') {
-      return {
-        blocked: false, decision: 'PROCEED', reason: `System 1: ${s1.reason}`,
-        raw: null, system1: s1, timing: timing(s0_ms, s1.ms, 0, 'system1'),
-      };
+    if (s1Config.mode !== 'off') trail.push({ tier: 'system1', verdict: s1.decision, reason: s1.reason });
+    if (s1.decision !== 'ESCALATE') {
+      return finish('system1', s1.decision, `System 1: ${s1.reason}`, { system1: s1 }, timing(s0_ms, s1.ms, 0, 'system1'));
     }
-    s2 = await deliberate();
+    s2 = await deliberate(s1);
   }
 
   // ── System 2: deliberation ───────────────────────────────────────
-  const { ms: s2_ms, error, ...result } = s2;
-  result.system1 = s1;
-  result.timing  = timing(s0_ms, s1.ms, s2_ms, error ? 'system2_error' : 'system2');
-  return result;
+  trail.push({ tier: 'system2', verdict: s2.decision, reason: s2.reason, ...(s2.error ? { error: true } : {}) });
+  return finish('system2', s2.decision, s2.reason, { raw: s2.raw, system1: s1 },
+                timing(s0_ms, s1.ms, s2.ms, s2.error ? 'system2_error' : 'system2'));
 }
 
 // ── Response parsing ─────────────────────────────────────────────────
 
+// Older prompts used other words for the same three verdicts.
+const VERDICT_ALIASES = {
+  APPROVE: 'APPROVE', PROCEED: 'APPROVE', NOTE: 'APPROVE',
+  REJECT: 'REJECT',   BLOCK: 'REJECT',
+  ESCALATE: 'ESCALATE', PAUSE: 'ESCALATE', ERROR: 'ESCALATE',
+};
+
 /**
- * Parse raw LLM text response into a structured result.
- * Anything that is not an approval is handed to the principal.
+ * Parse raw LLM text into a verdict. Anything unparseable escalates.
  */
 function parseResponseText(text) {
+  const escalate = (reason, raw = null) => ({ blocked: true, decision: 'ESCALATE', reason, raw });
   try {
     const parsed = extractDecisionJSON(text);
-    if (!parsed) {
-      return { blocked: true, decision: 'ESCALATE', reason: `no valid JSON found in response`, raw: null };
-    }
+    if (!parsed) return escalate('System 2: no valid JSON found in response');
 
-    const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK', 'ERROR']);
-    if (!validDecisions.has(parsed.decision)) {
-      return { blocked: true, decision: 'ESCALATE', reason: `invalid decision: ${parsed.decision}`, raw: parsed };
-    }
-
-    const blocked = parsed.decision !== 'PROCEED' && parsed.decision !== 'NOTE';
+    const decision = VERDICT_ALIASES[String(parsed.decision).toUpperCase()];
+    if (!decision) return escalate(`System 2: invalid decision: ${parsed.decision}`, parsed);
 
     return {
-      blocked,
-      decision: parsed.decision,
+      blocked: decision !== 'APPROVE',
+      decision,
       reason: parsed.rationale || parsed.convergence || parsed.convergence_summary || 'no rationale',
       raw: parsed,
     };
   } catch (err) {
-    return { blocked: true, decision: 'ESCALATE', reason: `parse error: ${err.message}`, raw: null };
+    return escalate(`System 2: parse error: ${err.message}`);
   }
 }
 
@@ -324,6 +327,7 @@ module.exports = {
   loadSystem1Spec,
   parseResponse,
   parseResponseText,
+  VERDICT_ALIASES,
   isExempt,
   checkSystem0,
   resolveReferencedFiles,

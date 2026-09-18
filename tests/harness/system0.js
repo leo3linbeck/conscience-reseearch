@@ -3,17 +3,20 @@
 /**
  * Guardian Angel — System 0 (reflex)
  *
- * Deterministic, sub-millisecond, no intelligence. A reflex has three outcomes:
+ * Deterministic, sub-millisecond, no intelligence. Like every tier, a reflex
+ * returns one of three verdicts:
  *
- *   APPROVE   — the action matches a pattern that is safe by construction
- *   PRINCIPAL — the flinch: the action matches a pattern that the principal must
- *               always see (destructive command, sensitive file). A flinch does not
- *               refuse; it hands the decision straight to the principal.
- *   null      — not recognised. Pass upward to System 1.
+ *   APPROVE  — the action matches a pattern that is safe by construction
+ *   REJECT   — the action matches a pattern that is wrong in every context
+ *              (remote code piped into a shell, wiping the root filesystem …)
+ *   ESCALATE — anything else. Patterns that merely LOOK dangerous (any `rm`,
+ *              a credentials file, an auto-executed config file) escalate with a
+ *              flag, so the tiers above know what the reflex noticed.
  *
- * System 0 must never approve something it does not fully recognise. Because
- * System 1 sits directly above it and is cheap, System 0 can afford to be strict:
- * when in doubt it returns null.
+ * A reflex cannot weigh context, so both of its decisive verdicts must be
+ * certain: it approves only what it fully recognises as safe and rejects only
+ * what no context could justify. `rm -rf build/` is ordinary work, so it
+ * escalates; `rm -rf /` is not, so it is rejected. When in doubt: ESCALATE.
  *
  * This file is the single source of truth. The clinical-trial harness requires
  * it directly; guardian-angel/install.js copies it to ~/.claude/hooks/ga-lib/.
@@ -61,7 +64,45 @@ const SENSITIVE_FILE_PATTERNS = [
   /\.docker\/config\.json$/i,
 ];
 
-// ── Destructive bash patterns (flinch) ───────────────────────────────
+// ── Reflex rejections: wrong in every context ────────────────────────
+// Keep this list short and certain. A false positive here is a REJECT of
+// legitimate work with no tier above to correct it.
+const REJECT_BASH_PATTERNS = [
+  { re: /\b(curl|wget|fetch)\b[^|;&\n]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b/,
+    why: 'runs code downloaded at run time directly in a shell, unseen and unverified' },
+  { re: /\b(ba|z|da|k)?sh\s+<\(\s*(curl|wget)\b/,
+    why: 'runs code downloaded at run time directly in a shell, unseen and unverified' },
+  { re: /\b(curl|wget)\b[^|;&\n]*\|\s*(sudo\s+)?(python3?|perl|ruby|node)\b(?!\s+-m\s+json\.tool)(\s+-\s*)?\s*($|[;&|\n])/,
+    why: 'runs code downloaded at run time directly in an interpreter, unseen and unverified' },
+  { re: /\bbase64\s+(-d|-D|--decode)\b[^|;&\n]*\|\s*(sudo\s+)?((ba|z|da|k)?sh|python3?|perl|ruby|node)\b/,
+    why: 'executes a decoded payload whose contents are hidden from review' },
+  { re: /\brm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z-]+\s+)*(--no-preserve-root\s+)?(\/|\/\*|~|~\/|\$HOME|\$HOME\/|\/(usr|etc|var|bin|sbin|lib|boot|home|root|System|Library|Users))(\s|$|;|&)/,
+    why: 'recursively deletes a root, home, or system directory' },
+  { re: /\bdd\b[^;&|\n]*\bof=\/dev\/(sd|hd|nvme|disk|vd|xvd|mmcblk)/,
+    why: 'overwrites a raw disk device' },
+  { re: /\bmkfs(\.\w+)?\s+[^;&|\n]*\/dev\/(sd|hd|nvme|disk|vd|xvd|mmcblk)/,
+    why: 'formats a disk device' },
+  { re: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
+    why: 'is a fork bomb' },
+  { re: />\s*\/dev\/(sd|hd|nvme|disk\d)/,
+    why: 'writes directly over a raw disk device' },
+];
+
+// ── Auto-executed files: reversible is not the same as safe ──────────
+// Writing these has effects beyond the file itself — they run on the next
+// push, commit, login, build or schedule. Never reflex-approve them.
+const AUTO_EXECUTED_FILE_PATTERNS = [
+  /(^|\/)\.github\/workflows\//, /(^|\/)\.gitlab-ci\.ya?ml$/, /(^|\/)\.circleci\//, /(^|\/)Jenkinsfile$/,
+  /(^|\/)azure-pipelines\.ya?ml$/, /(^|\/)\.travis\.ya?ml$/, /(^|\/)bitbucket-pipelines\.ya?ml$/,
+  /(^|\/)\.git\/hooks\//, /(^|\/)\.husky\//, /(^|\/)\.pre-commit-config\.ya?ml$/,
+  /(^|\/)\.(bash|zsh)rc$/, /(^|\/)\.(bash_|z)?profile$/, /(^|\/)\.zshenv$/, /(^|\/)\.bash_(login|logout)$/, /(^|\/)\.config\/fish\//,
+  /(^|\/)crontabs?(\/|$)/, /(^|\/)cron\.(d|daily|hourly|weekly|monthly)\//, /\/etc\//,
+  /(^|\/)systemd\//, /\.service$/, /\.timer$/, /(^|\/)LaunchAgents\//, /(^|\/)LaunchDaemons\//,
+  /(^|\/)\.ssh\//, /(^|\/)authorized_keys$/, /(^|\/)sudoers(\.d\/|$)/,
+  /(^|\/)\.claude\//, /(^|\/)\.vscode\/tasks\.json$/,
+];
+
+// ── Destructive bash patterns (escalate, flagged) ────────────────────
 const DESTRUCTIVE_BASH_PATTERNS = [
   /\brm\s/,
   /\brm\b/,
@@ -309,53 +350,62 @@ function resolveFileMetadata(toolName, toolInput) {
 // ── The reflex ───────────────────────────────────────────────────────
 
 /**
- * @returns {{verdict:'APPROVE'|'PRINCIPAL', reason:string, gate:string}|null}
- *          null → not recognised; pass upward to System 1.
+ * @returns {{verdict:'APPROVE'|'REJECT'|'ESCALATE', reason:string, gate:string, flags:string[]}}
+ *   flags — what the reflex noticed on an ESCALATE; passed up to Systems 1 and 2.
  */
 function checkSystem0(toolName, toolInput) {
-  if (EXEMPT_TOOLS.has(toolName)) {
-    return { verdict: 'APPROVE', reason: 'Tool has no lasting side effects', gate: 'exempt-tool' };
-  }
+  const approve  = (gate, reason) => ({ verdict: 'APPROVE',  gate, reason, flags: [] });
+  const reject   = (gate, reason) => ({ verdict: 'REJECT',   gate, reason, flags: [] });
+  const escalate = (gate, reason, flags = []) => ({ verdict: 'ESCALATE', gate, reason, flags });
+
+  if (EXEMPT_TOOLS.has(toolName)) return approve('exempt-tool', 'Tool has no lasting side effects');
 
   if (ALWAYS_ESCALATE_TOOLS.has(toolName)) {
-    return { verdict: 'PRINCIPAL', reason: `Tool '${toolName}' always requires the principal's approval`, gate: 'always-escalate' };
+    return escalate('always-escalate', `Tool '${toolName}' is configured to always be escalated`, [`tool '${toolName}' is marked always-escalate`]);
   }
 
   if (toolName === 'Write' || toolName === 'Edit') {
     const fileMeta = resolveFileMetadata(toolName, toolInput);
     if (fileMeta) {
       if (fileMeta.is_sensitive) {
-        return { verdict: 'PRINCIPAL', reason: `Sensitive file: ${fileMeta.sensitive_reason}`, gate: 'sensitive-file' };
+        return escalate('sensitive-file', `Sensitive file: ${fileMeta.sensitive_reason}`, ['target looks like a credentials or secrets file']);
+      }
+      if (AUTO_EXECUTED_FILE_PATTERNS.some(p => p.test(fileMeta.path))) {
+        return escalate('auto-executed-file', 'Target file runs automatically (CI, git hook, shell startup, scheduler, system config)',
+                        ['target file is executed automatically — its content matters, not just its reversibility']);
       }
       if (fileMeta.git_tracked && !fileMeta.has_staged_changes) {
-        return { verdict: 'APPROVE', reason: 'Git-tracked file, no staged changes — fully reversible', gate: 'git-tracked' };
+        return approve('git-tracked', 'Git-tracked file, no staged changes — fully reversible');
       }
-      if (!fileMeta.file_exists) {
-        return { verdict: 'APPROVE', reason: 'Creating new file', gate: 'new-file' };
-      }
+      if (!fileMeta.file_exists) return approve('new-file', 'Creating new file');
     }
   }
 
   if (toolName === 'Bash') {
     const cmd = String((toolInput && toolInput.command) || '');
 
-    // The flinch comes first: a destructive command is never "read-only".
+    for (const { re, why } of REJECT_BASH_PATTERNS) {
+      if (re.test(cmd)) return reject('reflex-reject', `This command ${why}. No context makes that safe.`);
+    }
+
+    // Looks dangerous, but context decides: a destructive command is never "read-only".
     for (const pattern of DESTRUCTIVE_BASH_PATTERNS) {
       if (pattern.test(cmd)) {
-        return { verdict: 'PRINCIPAL', reason: `Destructive command detected (${pattern}): requires the principal's approval`, gate: 'destructive-bash' };
+        return escalate('destructive-bash', `Destructive command pattern ${pattern}`, ['command matches a destructive pattern (deletes, overwrites, or discards data)']);
       }
     }
 
     if (isBashReadOnly(cmd)) {
       const oversized = checkReadSize(cmd);
       if (oversized) {
-        return { verdict: 'PRINCIPAL', reason: `Read target too large (${(oversized.size / 1024 / 1024).toFixed(0)}MB): ${oversized.path}`, gate: 'oversized-read' };
+        const mb = (oversized.size / 1024 / 1024).toFixed(0);
+        return escalate('oversized-read', `Read target too large (${mb}MB): ${oversized.path}`, [`command reads a very large file (${mb}MB)`]);
       }
-      return { verdict: 'APPROVE', reason: 'Read-only command', gate: 'read-only' };
+      return approve('read-only', 'Read-only command');
     }
   }
 
-  return null;
+  return escalate('unrecognised', 'Not recognised by any reflex pattern');
 }
 
 module.exports = {
@@ -368,5 +418,7 @@ module.exports = {
   ALWAYS_ESCALATE_TOOLS,
   SENSITIVE_FILE_PATTERNS,
   DESTRUCTIVE_BASH_PATTERNS,
+  REJECT_BASH_PATTERNS,
+  AUTO_EXECUTED_FILE_PATTERNS,
   READ_ONLY_BASH_COMMANDS,
 };

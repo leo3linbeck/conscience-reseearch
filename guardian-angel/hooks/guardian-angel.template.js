@@ -1,36 +1,42 @@
 #!/usr/bin/env node
 /**
- * Guardian Angel — Claude Code PreToolUse hook v5.0
+ * Guardian Angel — Claude Code PreToolUse hook v6.0
  *
  * THE PRINCIPAL IS SACROSANCT.
- * The human user is the principal. Every tier below exists to serve the
- * principal's genuine good — good as Aristotle, Aquinas and Newman define it —
- * and none of them may substitute its will for the principal's. A tier can do
- * exactly two things with a tool call: APPROVE it, or pass it UPWARD. The
- * machine never refuses on the principal's behalf; what no tier will approve
- * is laid before the principal, with reasons, and the principal decides.
+ * The human user is the principal. Every tier exists to serve the principal's
+ * genuine good — good as Aristotle, Aquinas and Newman define it. A tier acts
+ * on the principal's behalf when it is certain, and hands the decision upward
+ * when it is not. The principal is the last word.
  *
- * Progressive escalation:
+ * Every tier gives one of three verdicts:
+ *
+ *   APPROVE   the tool call proceeds
+ *   REJECT    the tool call is refused, and the reason is returned to the agent
+ *             and shown to the principal
+ *   ESCALATE  the call moves up:  System 0 → System 1 → System 2 → the principal
  *
  *   System 0 — reflex        deterministic patterns, <1ms, no intelligence.
- *                            Approves what is safe by construction. Its one
- *                            other move is the flinch: patterns the principal
- *                            must always see go straight to the principal.
+ *                            Approves what is safe by construction; rejects the
+ *                            few acts that are intrinsically evil in any context.
  *   System 1 — intuition     jev (TypeSafe): typed judgments with calibrated
- *                            probabilities, combined in code. Approves only when
- *                            every strand converges; otherwise defers.
- *   System 2 — deliberation  LLM moral reasoning (phronesis, synderesis and
- *                            conscientia, the illative sense). Approves, or
- *                            hands the decision to the principal.
+ *                            probabilities, combined in code. Approves when every
+ *                            strand converges on good, rejects when they converge
+ *                            on evil.
+ *   System 2 — deliberation  LLM moral reasoning over the big picture: the
+ *                            request, the session so far, what the lower tiers saw.
  *   Principal                the last word. Always.
  *
- * Failure travels upward, never downward: a missing key, a timeout, a parse
- * error or a crash moves the call toward the principal, never toward silent
- * approval.
+ * Accuracy is measured per tier: FP (rejected a benign call), FN (approved a
+ * harmful one), ER (escalation rate). Target FP = FN = 0 with ER low — an
+ * escalation is never wrong, but it spends the principal's attention.
+ *
+ * Doubt and failure travel upward: a missing key, a timeout, a parse error or a
+ * crash ESCALATES. Guardian Angel never approves or rejects because it broke.
  *
  * Hook outputs:
- *   APPROVE    →  exit 0, permissionDecision:"allow"
- *   PRINCIPAL  →  exit 0, permissionDecision:"ask", reason: GUARDIAN_ANGEL_ESCALATE|<nonce>|<reason>
+ *   APPROVE    →  permissionDecision:"allow"
+ *   REJECT     →  permissionDecision:"deny",  reason: GUARDIAN_ANGEL_REJECT|<tier>|<reason>
+ *   PRINCIPAL  →  permissionDecision:"ask",   reason: GUARDIAN_ANGEL_ESCALATE|<nonce>|<reason>
  *
  * Installed verbatim by guardian-angel/install.js. Everything tunable lives in
  * files beside it: ga-system2-prompt.txt, ga-system1.json, .ga-models.json, ga-lib/.
@@ -72,7 +78,7 @@ function respond(decision, reason) {
 
 // When Guardian Angel itself fails, the decision belongs to the principal.
 function failToPrincipal(reason) {
-  try { fs.appendFileSync(LOG_FILE, `[GUARDIAN ANGEL LOG - v5.0]\nTimestamp: ${new Date().toISOString()}\nDECISION: Principal\nRATIONALE: ${reason}\n${'─'.repeat(60)}\n`); } catch (_) {}
+  try { fs.appendFileSync(LOG_FILE, `[GUARDIAN ANGEL LOG - v6.0]\nTimestamp: ${new Date().toISOString()}\nDECISION: Principal\nRATIONALE: ${reason}\n${'─'.repeat(60)}\n`); } catch (_) {}
   respond('ask', `GUARDIAN_ANGEL_ESCALATE|internal|${reason}`);
   process.exit(0);
 }
@@ -108,12 +114,17 @@ const {
 
 const sessionTag = String(sessionId).slice(0, 8);
 
-// ── What did the principal ask for? ───────────────────────────────────
-// The transcript is JSONL (one entry per line). Read the tail and take the most
-// recent message the principal actually typed — not tool results, not harness
-// notes. Read fresh on every call: the request changes during a session.
-function readPrincipalRequest() {
-  if (!transcriptPath) return '';
+// ── The big picture, from the transcript ──────────────────────────────
+// The transcript is JSONL (one entry per line). Read the tail once and take:
+//   request — the most recent message the principal actually typed (not tool
+//             results, not harness notes). Read fresh on every call.
+//   history — the agent's recent tool calls, oldest first, so System 2 can judge
+//             this call as the next step in a sequence.
+const MAX_HISTORY = 12;
+
+function readTranscript() {
+  const out = { request: '', history: [] };
+  if (!transcriptPath) return out;
   try {
     const stat  = fs.statSync(transcriptPath);
     const start = Math.max(0, stat.size - TRANSCRIPT_TAIL);
@@ -130,8 +141,17 @@ function readPrincipalRequest() {
       try { entry = JSON.parse(line); } catch { continue; }   // first line of the tail may be cut
       if (entry.isMeta || entry.isSidechain) continue;
       const msg = entry.message || entry;
-      if ((entry.type || msg.role) !== 'user' || msg.role !== 'user') continue;
 
+      if (msg.role === 'assistant' && Array.isArray(msg.content) && out.history.length < MAX_HISTORY) {
+        for (const b of [...msg.content].reverse()) {
+          if (b.type !== 'tool_use' || out.history.length >= MAX_HISTORY) continue;
+          const inp = b.input || {};
+          out.history.unshift({ tool: b.name, summary: inp.command || inp.file_path || inp.pattern || inp.url || JSON.stringify(inp).slice(0, 200) });
+        }
+        continue;
+      }
+
+      if ((entry.type || msg.role) !== 'user' || msg.role !== 'user') continue;
       let text = '';
       if (typeof msg.content === 'string') {
         text = msg.content;
@@ -143,18 +163,19 @@ function readPrincipalRequest() {
                  .replace(/<ide_[a-z_]+>[\s\S]*?<\/ide_[a-z_]+>/g, '')
                  .trim();
       if (!text || text.startsWith('<')) continue;             // command wrappers, local stdout
-      return text.slice(0, 2000);
+      out.request = text.slice(0, 2000);
+      break;                                                   // history = actions since this request
     }
-  } catch (_) { /* no transcript → no request; System 1 will defer */ }
-  return '';
+  } catch (_) { /* no transcript → no request; System 1 will escalate */ }
+  return out;
 }
 
-// ── Structured logging (v5.0) ─────────────────────────────────────────
-const trail = { system0: 'Not recognised — passed upward', system1: null, system2: null };
+// ── Structured logging (v6.0) ─────────────────────────────────────────
+const trail = { system0: 'ESCALATE [unrecognised]', system1: null, system2: null };
 
 function flushLog(decision, resolvedBy, rationale) {
   const lines = [
-    '[GUARDIAN ANGEL LOG - v5.0]',
+    '[GUARDIAN ANGEL LOG - v6.0]',
     `Timestamp: ${new Date().toISOString()}`,
     `Session: ${sessionTag}`,
     `Action: ${toolName}`,
@@ -206,10 +227,16 @@ function flushLog(decision, resolvedBy, rationale) {
   try { fs.appendFileSync(LOG_FILE, lines.join('\n') + '\n'); } catch (_) { /* non-fatal */ }
 }
 
-// ── The only two outcomes ─────────────────────────────────────────────
+// ── The three outcomes ────────────────────────────────────────────────
 function approve(resolvedBy, rationale) {
   flushLog('Approve', resolvedBy, rationale);
   respond('allow');
+  process.exit(0);
+}
+
+function reject(resolvedBy, reason) {
+  flushLog('Reject', resolvedBy, reason);
+  respond('deny', `GUARDIAN_ANGEL_REJECT|${resolvedBy}|Guardian Angel (${resolvedBy}) rejected this action: ${reason}`);
   process.exit(0);
 }
 
@@ -323,7 +350,7 @@ function loadModelConfig() {
 
 const undecided = (reason) => ({ decision: 'ESCALATE', reason });
 
-async function invokeSystem2(call) {
+async function invokeSystem2(call, intuition) {
   let systemPrompt;
   try { systemPrompt = fs.readFileSync(SYSTEM2_PROMPT_PATH, 'utf8'); }
   catch { return undecided('System 2 unavailable: ga-system2-prompt.txt missing (run install.js)'); }
@@ -337,7 +364,7 @@ async function invokeSystem2(call) {
   const { key, model, endpoint, format } = modelConfig;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SYSTEM2_API_TIMEOUT);
-  const userMessage = context.buildSystem2UserMessage(call);
+  const userMessage = context.buildSystem2UserMessage({ ...call, intuition });
 
   try {
     let response;
@@ -401,11 +428,14 @@ function parseSystem2Response(apiResult) {
     const parsed = context.extractDecisionJSON(text);
     if (!parsed) return undecided('System 2: no JSON decision found in response');
 
-    const validDecisions = new Set(['PROCEED', 'NOTE', 'PAUSE', 'ESCALATE', 'BLOCK', 'ERROR']);
-    if (!validDecisions.has(parsed.decision)) return undecided(`System 2 invalid decision: ${parsed.decision}`);
+    // Older prompts used other words for the same three verdicts.
+    const ALIASES = { APPROVE: 'APPROVE', PROCEED: 'APPROVE', NOTE: 'APPROVE', REJECT: 'REJECT', BLOCK: 'REJECT',
+                      ESCALATE: 'ESCALATE', PAUSE: 'ESCALATE', ERROR: 'ESCALATE' };
+    const decision = ALIASES[String(parsed.decision).toUpperCase()];
+    if (!decision) return undecided(`System 2 invalid decision: ${parsed.decision}`);
 
     return {
-      decision:    parsed.decision,
+      decision,
       reason:      parsed.rationale || parsed.convergence || parsed.convergence_summary || 'System 2 deliberation',
       synderesis:  parsed.synderesis || { pass: true, violation: null },
       score:       parsed.score ?? parsed.gate_v?.score ?? null,
@@ -427,39 +457,34 @@ function parseSystem2Response(apiResult) {
 
   // ── SYSTEM 0 — reflex ──────────────────────────────────────────────
   const reflex = system0.checkSystem0(toolName, toolInput);
-  if (reflex && reflex.verdict === 'APPROVE') {
-    trail.system0 = `Approved [${reflex.gate}]: ${reflex.reason}`;
-    approve('System 0', reflex.reason);
-  }
+  trail.system0 = `${reflex.verdict} [${reflex.gate}]: ${reflex.reason}`;
+  if (reflex.verdict === 'APPROVE') approve('System 0', reflex.reason);
+  if (reflex.verdict === 'REJECT')  reject('System 0', reflex.reason);
 
-  // The principal already said yes to exactly this call — their word outranks a flinch
+  // The principal already said yes to exactly this call
   const approval = consumeApproval(hashParams(toolName, toolInput));
   if (approval) {
-    trail.system0 = `Approved [principal-approved]: nonce ${approval.nonce}`;
+    trail.system0 = `APPROVE [principal-approved]: nonce ${approval.nonce}`;
     approve('System 0', `Approved by the principal (nonce ${approval.nonce})`);
   }
 
-  if (reflex) {
-    trail.system0 = `Flinch [${reflex.gate}]: ${reflex.reason}`;
-    toPrincipal('System 0', reflex.reason);
-  }
-
-  // ── Context: what would actually run? ──────────────────────────────
+  // ── Context: what would actually run, and where does it sit? ───────
+  const reflexFlags = [...reflex.flags];
   const { files: resolvedFiles, unresolved } = context.resolveReferencedFiles(toolName, toolInput, callCwd);
   if (unresolved.length > 0) {
-    trail.system0 = 'Flinch [unresolved-script]: cannot see what would run';
-    toPrincipal('System 0', `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`);
+    reflexFlags.push(`the command runs script(s) whose contents could not be read: ${unresolved.join(', ')}`);
   }
+  const { request, history } = readTranscript();
 
   const call = {
-    toolName, toolInput, resolvedFiles,
-    principalRequest: readPrincipalRequest(),
+    toolName, toolInput, resolvedFiles, reflexFlags, history,
+    principalRequest: request,
     fileMeta:         system0.resolveFileMetadata(toolName, toolInput),
   };
 
   // ── SYSTEM 1 — intuition (jev) ─────────────────────────────────────
   let spec = null;
-  try { spec = system1.loadSystem1Spec(SYSTEM1_SPEC_PATH); } catch (_) { /* evaluateSystem1 defers */ }
+  try { spec = system1.loadSystem1Spec(SYSTEM1_SPEC_PATH); } catch (_) { /* evaluateSystem1 escalates */ }
   const s1Config = system1.loadSystem1Config();
 
   let s2Result;
@@ -467,32 +492,24 @@ function parseSystem2Response(apiResult) {
     // Advisory only: consult jev alongside System 2, record it, act on System 2.
     [trail.system1, s2Result] = await Promise.all([
       system1.evaluateSystem1(spec, call, s1Config),
-      invokeSystem2(call),
+      invokeSystem2(call, null),
     ]);
   } else {
     trail.system1 = await system1.evaluateSystem1(spec, call, s1Config);
     if (trail.system1.decision === 'APPROVE') approve('System 1', trail.system1.reason);
+    if (trail.system1.decision === 'REJECT')  reject('System 1', trail.system1.reason);
 
     // ── SYSTEM 2 — deliberation ──────────────────────────────────────
-    s2Result = await invokeSystem2(call);
+    s2Result = await invokeSystem2(call, trail.system1);
   }
   trail.system2 = s2Result;
 
-  switch (s2Result.decision) {
-    case 'PROCEED':
-    case 'NOTE':
-      approve('System 2', s2Result.reason);
-      break;
-
-    case 'BLOCK':
-      // A legacy prompt may still say BLOCK. The machine does not refuse on the
-      // principal's behalf: state the violation plainly and let the principal decide.
-      toPrincipal('System 2', `GRAVE CONCERN — ${s2Result.synderesis?.violation || 'first principles violated'}: ${s2Result.reason}`);
-      break;
-
-    default:   // ESCALATE, PAUSE, ERROR
-      toPrincipal('System 2', s2Result.reason);
+  if (s2Result.decision === 'APPROVE') approve('System 2', s2Result.reason);
+  if (s2Result.decision === 'REJECT') {
+    const violation = s2Result.synderesis?.pass === false && s2Result.synderesis.violation;
+    reject('System 2', violation ? `${violation} — ${s2Result.reason}` : s2Result.reason);
   }
+  toPrincipal('System 2', s2Result.reason);
 })().catch(err => {
   failToPrincipal(`Guardian Angel internal error (${err.message}) — your decision`);
 });

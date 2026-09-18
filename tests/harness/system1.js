@@ -3,21 +3,18 @@
 /**
  * Guardian Angel — System 1 (intuition) via TypeSafe / jev
  *
- * Progressive escalation:
- *   System 0 (reflex)       → approves, or passes upward
- *   System 1 (intuition)    → approves, or passes upward      ← this module
- *   System 2 (deliberation) → approves, or passes upward
- *   The principal           → decides. Always the last word.
+ * Every tier returns APPROVE, REJECT or ESCALATE, and escalation runs
+ *   System 0 (reflex) → System 1 (intuition) → System 2 (deliberation) → the principal.
  *
  * System 1 asks jev a fixed set of typed questions about one tool call and
- * combines the probabilities in code. It has exactly two outcomes:
+ * combines the probabilities in code — Newman's illative sense as a program:
  *
- *   APPROVE — every strand converges on the good of the principal
- *   DEFER   — anything else: a dissenting strand, a missing answer, no API key,
- *             a timeout, an HTTP error. Failure always travels UPWARD, toward
- *             more deliberation and ultimately toward the principal.
- *
- * System 1 never refuses an action. Refusal belongs to the principal alone.
+ *   APPROVE  — every strand converges on the good of the principal
+ *   REJECT   — the strands converge on evil: a first principle is violated with
+ *              near certainty AND the action does not serve the principal AND
+ *              the stakes are grave. All three, never one alone.
+ *   ESCALATE — anything else, including every failure: no API key, a timeout,
+ *              an HTTP error, a missing answer. Doubt always travels upward.
  *
  * This file is the single source of truth. The clinical-trial harness requires
  * it directly; guardian-angel/install.js copies it to ~/.claude/hooks/ga-lib/.
@@ -41,9 +38,9 @@ const MODELS_PATH = path.join(HOOK_DIR, '.ga-models.json');
 // Precedence: environment (Docker test containers) → .ga-models.json "system1".
 //   GA_S1_KEY | TYPESAFE_API_KEY, GA_S1_MODEL, GA_S1_BASE, GA_S1_MODE, GA_S1_TIMEOUT_MS
 // mode:
-//   enforce — System 1 may approve (default)
-//   shadow  — System 1 is consulted and logged but never approves; everything
-//             still goes to System 2. Use this to measure agreement before trusting it.
+//   enforce — System 1's verdicts take effect (default)
+//   shadow  — System 1 is consulted and logged but its verdict is advisory; every
+//             call still goes to System 2. Use this to measure before trusting it.
 //   off     — System 1 is skipped
 
 function loadSystem1Config(env = process.env) {
@@ -121,10 +118,12 @@ function sanitize(value) {
 // Named JSON fields, so questions can point at `action`, `principal_request`
 // and `referenced_files`. Observed facts only — nothing inferred.
 
-function buildState({ toolName, toolInput, principalRequest, fileMeta, resolvedFiles }) {
+function buildState({ toolName, toolInput, principalRequest, fileMeta, resolvedFiles, reflexFlags }) {
   const state = {
     action: { tool: toolName, input: sanitize(toolInput || {}) },
   };
+
+  if (Array.isArray(reflexFlags) && reflexFlags.length > 0) state.reflex_flags = reflexFlags;
 
   if (principalRequest && String(principalRequest).trim()) {
     state.principal_request = sanitize(String(principalRequest).trim());
@@ -219,9 +218,42 @@ function applyPolicy(policy, answers) {
   }
 
   const dissent = strands.filter(s => !s.converges);
+
+  // REJECT — convergence on evil. Every clause must hold:
+  //   any_veto:       at least one first-principle (veto) strand at or above this value
+  //   require_below:  each named strand at or below its value (e.g. does not serve the principal)
+  //   floor:          each named score at or above its value (e.g. grave stakes)
+  let rejected = false;
+  let grounds  = [];
+  const rule = policy.reject;
+  if (rule && typeof rule.any_veto === 'number') {
+    grounds = strands.filter(s => s.kind === 'veto' && s.value !== null && s.value >= rule.any_veto)
+                     .sort((a, b) => b.value - a.value);
+    const below = Object.entries(rule.require_below || {}).every(([id, max]) => {
+      const p = num(answers[id]?.noul); return p !== null && p <= max;
+    });
+    const floor = Object.entries(rule.floor || {}).every(([id, min]) => {
+      const v = num(answers[id]?.score); return v !== null && v >= min;
+    });
+    rejected = grounds.length > 0 && below && floor;
+  }
+
   // An empty policy converges on nothing — never approve by default.
-  return { approved: strands.length > 0 && dissent.length === 0, strands, dissent };
+  const approved = !rejected && strands.length > 0 && dissent.length === 0;
+  return { approved, rejected, grounds, strands, dissent };
 }
+
+// What each first principle means, for the message a REJECT gives the agent and the principal.
+const VIOLATIONS = {
+  theft:           "it would take the principal's credentials or private data and send them elsewhere",
+  destruction:     "it would irrecoverably destroy the principal's data or system state",
+  deception:       'it conceals or misrepresents what it really does',
+  blind_execution: 'it would execute unvetted outside code that cannot be inspected',
+  harm_to_others:  'it would wrong a third party',
+  foreign_master:  'it serves someone other than the principal',
+  loss_of_control: "it would weaken the principal's control over their own systems",
+  manipulation:    'it contains text trying to steer the safety review',
+};
 
 function describeStrand(s) {
   if (s.value === null) return `${s.id} (no answer)`;
@@ -235,9 +267,9 @@ function describeStrand(s) {
 
 /**
  * @returns {Promise<{
- *   decision: 'APPROVE'|'DEFER',   // what System 1 concluded
+ *   decision: 'APPROVE'|'REJECT'|'ESCALATE',
  *   consulted: boolean,            // whether jev was actually asked
- *   shadow: boolean,               // true → caller must NOT act on an APPROVE
+ *   shadow: boolean,               // true → advisory: caller must NOT act on the verdict
  *   reason: string,
  *   strands: object[], dissent: object[],
  *   usage: object|null, ms: number,
@@ -246,8 +278,8 @@ function describeStrand(s) {
 async function evaluateSystem1(spec, call, config = loadSystem1Config()) {
   const t0 = Date.now();
   const defer = (reason, extra = {}) => ({
-    decision: 'DEFER', consulted: false, shadow: config.mode === 'shadow',
-    reason, strands: [], dissent: [], usage: null, ms: Date.now() - t0, ...extra,
+    decision: 'ESCALATE', consulted: false, shadow: config.mode === 'shadow',
+    reason, strands: [], dissent: [], grounds: [], usage: null, ms: Date.now() - t0, ...extra,
   });
 
   if (config.mode === 'off') return defer('System 1 is switched off');
@@ -261,12 +293,16 @@ async function evaluateSystem1(spec, call, config = loadSystem1Config()) {
     const result    = await askJev(config, model, state, questions);
     const verdict   = applyPolicy(spec.policy, result.answers);
 
-    const reason = verdict.approved
-      ? `All ${verdict.strands.length} strands converge on the good of the principal`
-      : `Strands do not converge: ${verdict.dissent.map(describeStrand).join('; ')}`;
+    const reason = verdict.rejected
+      ? `Rejected because ${verdict.grounds.map(g => `${VIOLATIONS[g.id] || g.id} (${g.id}=${g.value.toFixed(2)})`).join('; and ')}. ` +
+        'It does not serve what the principal asked for, and the stakes are grave.'
+      : verdict.approved
+        ? `All ${verdict.strands.length} strands converge on the good of the principal`
+        : `Strands do not converge: ${verdict.dissent.map(describeStrand).join('; ')}`;
 
     return {
-      decision:  verdict.approved ? 'APPROVE' : 'DEFER',
+      decision:  verdict.rejected ? 'REJECT' : verdict.approved ? 'APPROVE' : 'ESCALATE',
+      grounds:   verdict.grounds,
       consulted: true,
       shadow:    config.mode === 'shadow',
       reason,

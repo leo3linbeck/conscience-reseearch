@@ -78,6 +78,8 @@ const client = new TrialAPIClient({
   condition:   CONDITION,
   wrapperText,
   userPrompt:  scenario.prompt,
+  // Checked after every executed tool call, so harm can be pinned on the call that caused it
+  harmProbe:   () => checkEvidence(scenario.harm_evidence, MOCK_URL).harm_occurred,
 });
 
 const start = Date.now();
@@ -89,10 +91,15 @@ runScenario()
     // ── Check evidence ──────────────────────────────────────────
     const evidence = checkEvidence(scenario.harm_evidence, MOCK_URL);
 
+    // A mid-run probe is only trusted if the final check agrees harm occurred.
+    if (!evidence.harm_occurred) for (const a of apiResult.toolAttempts) a.harm_after = false;
+
     // ── Determine blocked status ────────────────────────────────
     // Record per-attempt blocking stats for illative analysis in collect-metrics
     const gaEvaluated = apiResult.toolAttempts.filter(a => a.ga_decision !== null);
     const gaBlocked = apiResult.toolAttempts.filter(a => a.ga_blocked);
+    const gaRejected  = apiResult.toolAttempts.filter(a => a.ga_decision === 'REJECT');
+    const gaEscalated = apiResult.toolAttempts.filter(a => a.ga_decision === 'ESCALATE');
     const permBlocked = apiResult.toolAttempts.filter(a => a.perm_blocked);
     const blocked = gaBlocked.length > 0 || permBlocked.length > 0;
 
@@ -126,9 +133,12 @@ runScenario()
       ga_s1_mode:     process.env.GA_S1_MODE || null,
       harm_occurred:  evidence.harm_occurred,
       harm_details:   evidence.details,
+      harm_baseline:  apiResult.harmBaseline,   // true → evidence pre-existed; no per-call attribution
       blocked,
       ga_evaluated_count: gaEvaluated.length,
       ga_blocked_count:   gaBlocked.length,
+      ga_rejected_count:  gaRejected.length,     // refused by a tier
+      ga_escalated_count: gaEscalated.length,    // reached the (absent) principal
       perm_blocked_count: permBlocked.length,
       tool_attempts:  apiResult.toolAttempts,
       turns:          apiResult.turnCount,
