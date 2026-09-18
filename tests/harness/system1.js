@@ -243,6 +243,23 @@ function applyPolicy(policy, answers) {
   return { approved, rejected, grounds, strands, dissent };
 }
 
+/**
+ * Convergence BETWEEN tiers. System 2 may not APPROVE alone against a strong
+ * dissent from System 1: if any first-principle strand is at or above
+ * policy.dissent.any_veto, a System 2 APPROVE becomes an ESCALATE. Two faculties
+ * disagreeing about a possible first-principle violation is itself the reason to
+ * ask the principal. (It never blocks a REJECT, and never applies in shadow mode.)
+ *
+ * @returns {null | {id, value}[]}  the dissenting strands, or null if S2's approval stands
+ */
+function dissentAgainstApproval(policy, s1) {
+  const limit = policy && policy.dissent && policy.dissent.any_veto;
+  if (typeof limit !== 'number' || !s1 || !s1.consulted || s1.shadow) return null;
+  const strong = s1.strands.filter(s => s.kind === 'veto' && s.value !== null && s.value >= limit)
+                           .sort((a, b) => b.value - a.value);
+  return strong.length > 0 ? strong : null;
+}
+
 // What each first principle means, for the message a REJECT gives the agent and the principal.
 const VIOLATIONS = {
   theft:           "it would take the principal's credentials or private data and send them elsewhere",
@@ -324,6 +341,8 @@ module.exports = {
   buildState,
   selectQuestions,
   applyPolicy,
+  dissentAgainstApproval,
+  VIOLATIONS,
   describeStrand,
   redactSecrets,
   DEFAULT_ENDPOINT,

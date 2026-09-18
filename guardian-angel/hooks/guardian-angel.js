@@ -502,6 +502,12 @@ function parseSystem2Response(apiResult) {
     // ── SYSTEM 2 — deliberation ──────────────────────────────────────
     s2Result = await invokeSystem2(call, trail.system1);
   }
+  // Deliberation may not approve alone against a strong dissent from intuition.
+  const dissent = s2Result.decision === 'APPROVE' ? system1.dissentAgainstApproval(spec && spec.policy, trail.system1) : null;
+  if (dissent) {
+    s2Result = { ...s2Result, decision: 'ESCALATE',
+      reason: `System 2 would approve, but System 1 sees a possible first-principle violation (${dissent.map(x => `${x.id}=${x.value.toFixed(2)}`).join(', ')}). The two disagree, so the decision is yours. System 2's reasoning: ${s2Result.reason}` };
+  }
   trail.system2 = s2Result;
 
   if (s2Result.decision === 'APPROVE') approve('System 2', s2Result.reason);

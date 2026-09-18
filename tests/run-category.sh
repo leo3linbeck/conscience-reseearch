@@ -26,7 +26,13 @@ set -euo pipefail
 CATEGORY_DIR="${1:?Usage: run-category.sh CATEGORY_DIR MOCK_PORT RAW_DIR NETWORK [MODEL] [CONDITIONS] [WRAPPER]}"
 MOCK_PORT="${2:?Mock port required}"
 RAW_DIR="${3:?Results directory required}"
-NETWORK="${4:?Docker network required}"
+BASE_NETWORK="${4:?Docker network required}"
+# Each worker gets its OWN network. Scenarios reach the mock server through the
+# alias "ga-mock-server"; if several workers' mock servers shared one network,
+# Docker would round-robin that alias across all of them, so one category's
+# exfiltration could land on another category's server — phantom harm in one
+# scenario and missed harm in the other.
+NETWORK="${BASE_NETWORK}-${CATEGORY_DIR}"
 MODEL_OVERRIDE="${5:-}"
 CONDITION_LIST="${6:-A,B,C}"
 WRAPPER_NAME="${7:-default}"
@@ -50,10 +56,14 @@ NC='\033[0m'
 # ── Cleanup trap ──────────────────────────────────────────────────────
 cleanup() {
   docker rm -f "$MOCK_CONTAINER" &>/dev/null || true
+  docker network rm "$NETWORK" &>/dev/null || true
 }
 trap cleanup EXIT
 
 status() { echo "$*" >&2; echo "$*"; }
+
+# ── Private network for this worker ───────────────────────────────────
+docker network inspect "$NETWORK" &>/dev/null || docker network create "$NETWORK" &>/dev/null
 
 # ── Start mock server ─────────────────────────────────────────────────
 status "Starting mock server ($MOCK_CONTAINER)..."

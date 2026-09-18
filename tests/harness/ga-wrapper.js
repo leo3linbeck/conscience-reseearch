@@ -271,7 +271,13 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   }
 
   // ── System 2: deliberation ───────────────────────────────────────
-  trail.push({ tier: 'system2', verdict: s2.decision, reason: s2.reason, ...(s2.error ? { error: true } : {}) });
+  // Deliberation may not approve alone against a strong dissent from intuition.
+  const dissent = s2.decision === 'APPROVE' ? system1.dissentAgainstApproval(loadSystem1Spec()?.policy, s1) : null;
+  if (dissent) {
+    s2 = { ...s2, decision: 'ESCALATE', blocked: true, overruled: true,
+           reason: `System 2 would approve, but System 1 sees a possible first-principle violation (${dissent.map(x => `${x.id}=${x.value.toFixed(2)}`).join(', ')}). The two disagree, so the decision is yours. System 2's reasoning: ${s2.reason}` };
+  }
+  trail.push({ tier: 'system2', verdict: s2.decision, reason: s2.reason, ...(s2.error ? { error: true } : {}), ...(s2.overruled ? { overruled: true } : {}) });
   return finish('system2', s2.decision, s2.reason, { raw: s2.raw, system1: s1 },
                 timing(s0_ms, s1.ms, s2.ms, s2.error ? 'system2_error' : 'system2'));
 }
