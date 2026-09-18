@@ -17,6 +17,9 @@
 #   ./run-trial.sh --ga-key AIza...                 # GA evaluator API key
 #   ./run-trial.sh --ga-endpoint https://generativelanguage.googleapis.com
 #   ./run-trial.sh --ga-format openai               # anthropic, openai, or ollama
+#   ./run-trial.sh --s1-mode shadow                 # System 1 (jev): enforce | shadow | off
+#   ./run-trial.sh --s1-key ts-...                  # TypeSafe API key (or TYPESAFE_API_KEY, or .ga-models.json)
+#   ./run-trial.sh --s1-spec my-questions           # use wrappers/my-questions.json
 #   ./run-trial.sh --optimize [--max-iter N]        # run optimization loop
 #   ./run-trial.sh --sequential                     # serial mode
 #   ./run-trial.sh --v2                             # run legacy v2 scenarios
@@ -51,7 +54,13 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$GA_KEY_FILE" ]]; then
 fi
 
 # Helper: append GA-specific env vars to a DOCKER_ENV array
+# System 1 (jev) settings travel as exported GA_S1_* variables so that
+# run-category.sh workers inherit them without new positional arguments.
 append_ga_env() {
+  [[ -n "${GA_S1_KEY:-}" ]]  && DOCKER_ENV+=(-e "GA_S1_KEY=$GA_S1_KEY")
+  [[ -n "${GA_S1_MODE:-}" ]] && DOCKER_ENV+=(-e "GA_S1_MODE=$GA_S1_MODE")
+  [[ -n "${GA_S1_SPEC:-}" ]] && DOCKER_ENV+=(-e "GA_S1_SPEC=$GA_S1_SPEC")
+  [[ -n "${GA_S1_MODEL:-}" ]] && DOCKER_ENV+=(-e "GA_S1_MODEL=$GA_S1_MODEL")
   [[ -n "$GA_MODEL_OVERRIDE" ]]    && DOCKER_ENV+=(-e "GA_MODEL=$GA_MODEL_OVERRIDE")
   [[ -n "$GA_KEY_OVERRIDE" ]]      && DOCKER_ENV+=(-e "GA_API_KEY=$GA_KEY_OVERRIDE")
   [[ -n "$GA_ENDPOINT_OVERRIDE" ]] && DOCKER_ENV+=(-e "GA_API_BASE=$GA_ENDPOINT_OVERRIDE")
@@ -99,6 +108,9 @@ while [[ "$#" -gt 0 ]]; do
     --ga-key)        GA_KEY_OVERRIDE="$2";     shift 2 ;;
     --ga-endpoint)   GA_ENDPOINT_OVERRIDE="$2"; shift 2 ;;
     --ga-format)     GA_FORMAT_OVERRIDE="$2";  shift 2 ;;
+    --s1-mode)       export GA_S1_MODE="$2";   shift 2 ;;
+    --s1-key)        export GA_S1_KEY="$2";    shift 2 ;;
+    --s1-spec)       export GA_S1_SPEC="$2";   shift 2 ;;
     --wrapper)       WRAPPER_NAME="$2";        shift 2 ;;
     --v2)            USE_V2=true;           shift ;;
     --sequential)    PARALLEL=false;        shift ;;
@@ -122,6 +134,22 @@ if [[ -z "$GA_MODEL_OVERRIDE" && -f "$GA_MODELS_FILE" ]]; then
   if [[ -n "$_ga_config" ]]; then
     IFS=$'\n' read -rd '' GA_MODEL_OVERRIDE GA_KEY_OVERRIDE GA_ENDPOINT_OVERRIDE GA_FORMAT_OVERRIDE <<< "$_ga_config" || true
   fi
+fi
+
+# ── Auto-load System 1 (jev) key: --s1-key → TYPESAFE_API_KEY → .ga-models.json ──
+if [[ -z "${GA_S1_KEY:-}" && -n "${TYPESAFE_API_KEY:-}" ]]; then
+  export GA_S1_KEY="$TYPESAFE_API_KEY"
+fi
+if [[ -z "${GA_S1_KEY:-}" && -f "$GA_MODELS_FILE" ]]; then
+  _s1_key=$(node -e "
+    const c = JSON.parse(require('fs').readFileSync('$GA_MODELS_FILE','utf8'));
+    if (c.system1?.key) console.log(c.system1.key);
+  " 2>/dev/null || true)
+  [[ -n "$_s1_key" ]] && export GA_S1_KEY="$_s1_key"
+fi
+if [[ -z "${GA_S1_KEY:-}" && "${GA_S1_MODE:-enforce}" != "off" ]]; then
+  echo "NOTE: no TypeSafe API key found — System 1 (jev) will defer every call to System 2." >&2
+  echo "      Set one with: node guardian-angel/install.js --set-system1-key <key>" >&2
 fi
 
 # ── Rerun-failures mode ───────────────────────────────────────────────
@@ -174,6 +202,7 @@ if [[ -n "$RERUN_FAILURES" ]]; then
   [[ "$AB_TEST" == "true" ]] && echo "  Wrapper D: alternative"
   echo "  Agent model: ${MODEL_OVERRIDE:-claude-haiku-4-5-20251001}"
   echo "  GA model:    ${GA_MODEL_OVERRIDE:-claude-haiku-4-5-20251001}"
+  echo "  System 1:    jev (${GA_S1_MODE:-enforce})$([[ -z "${GA_S1_KEY:-}" ]] && echo ' — NO KEY, deferring all')"
   echo "═══════════════════════════════════════════════════════"
   echo ""
 

@@ -106,9 +106,11 @@ runScenario()
       .map(a => a.ga_timing);
     const ga_timing_summary = gaTimings.length > 0 ? {
       total_ms:   gaTimings.reduce((sum, t) => sum + t.total_ms, 0),
+      system0_ms: gaTimings.reduce((sum, t) => sum + t.system0_ms, 0),
       system1_ms: gaTimings.reduce((sum, t) => sum + t.system1_ms, 0),
       system2_ms: gaTimings.reduce((sum, t) => sum + t.system2_ms, 0),
       calls:      gaTimings.length,
+      s0_only:    gaTimings.filter(t => t.resolved_by === 'system0').length,
       s1_only:    gaTimings.filter(t => t.resolved_by === 'system1').length,
       s2_calls:   gaTimings.filter(t => t.resolved_by === 'system2' || t.resolved_by === 'system2_error').length,
     } : null;
@@ -121,6 +123,7 @@ runScenario()
       variant:        scenario.variant,
       agent_model:    client.model,
       ga_model:       process.env.GA_MODEL || null,
+      ga_s1_mode:     process.env.GA_S1_MODE || null,
       harm_occurred:  evidence.harm_occurred,
       harm_details:   evidence.details,
       blocked,

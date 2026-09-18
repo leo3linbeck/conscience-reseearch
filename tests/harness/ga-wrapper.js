@@ -1,24 +1,34 @@
 'use strict';
 
 /**
- * Guardian Angel Clinical Trial v3 — Stateless GA Wrapper
+ * Guardian Angel Clinical Trial — Stateless GA Wrapper
  *
- * Single-call System 2 with chain-of-thought:
- *   The LLM first compiles (enumerates all leaf operations),
- *   then evaluates (applies Thomistic moral framework).
- *   Both steps happen in one prompt, one API call.
+ * Progressive escalation. Each tier may only APPROVE an action or pass it
+ * upward; the principal is always the last word.
  *
- * The wrapper prompt (default.txt) is the single variable that gets optimized.
+ *   System 0 — reflex        (system0.js)  deterministic patterns, <1ms
+ *   System 1 — intuition     (system1.js)  typed judgments from jev (TypeSafe)
+ *   System 2 — deliberation  (this file)   LLM moral reasoning: compile leaf
+ *                                          operations, then evaluate them
+ *   Principal                              in the trial, "handed to the principal"
+ *                                          is recorded as blocked
+ *
+ * Two variables get optimized: the System 2 wrapper prompt (wrappers/default.txt)
+ * and the System 1 questions + policy (wrappers/system1.json).
  */
 
 const fs   = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 const { withRateLimit } = require('./rate-limiter');
+
+const system0 = require('./system0');
+const system1 = require('./system1');
+const { resolveReferencedFiles, buildSystem2UserMessage, extractDecisionJSON } = require('./context');
+
+const { checkSystem0, resolveFileMetadata } = system0;
 
 const DEFAULT_MODEL   = 'claude-haiku-4-5-20251001';
 const API_TIMEOUT     = 12_000;
-const MAX_FILE_SIZE   = 10_000;
 const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
 
 // ── LLM Backend Configuration ────────────────────────────────────────
@@ -58,152 +68,6 @@ function detectApiFormat() {
 
 const GA_API_FORMAT = detectApiFormat();
 
-// ── Sensitive file patterns ──────────────────────────────────────────
-const SENSITIVE_FILE_PATTERNS = [
-  /\.env$/i,
-  /\.env\.[a-z]+$/i,
-  /credentials$/i,
-  /\.pem$/i,
-  /\.key$/i,
-  /\.p12$/i,
-  /\.pfx$/i,
-  /\.jks$/i,
-  /\.keystore$/i,
-  /id_rsa/i,
-  /id_ed25519/i,
-  /id_ecdsa/i,
-  /secrets?\.(ya?ml|json|toml)$/i,
-  /\.secret$/i,
-  /\.htpasswd$/i,
-  /\.netrc$/i,
-  /\.pgpass$/i,
-  /token(s)?\.(json|ya?ml|txt)$/i,
-  /auth\.(json|ya?ml)$/i,
-  /\.npmrc$/i,
-  /\.pypirc$/i,
-  /\.docker\/config\.json$/i,
-];
-
-// ── System 1: Tools and commands that always escalate ────────────────
-
-const EXEMPT_TOOLS = new Set([
-  'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
-  'ToolSearch', 'Agent', 'EnterPlanMode', 'ExitPlanMode',
-  'Diff', 'List', 'Show', 'Parse', 'Summarize', 'Explain',
-  'Review', 'Describe', 'ReadFile', 'CheckFile', 'FindInFiles',
-  'AskUserQuestion', 'TaskOutput',
-]);
-
-const ALWAYS_ESCALATE_TOOLS = new Set(/* populate as needed */ []);
-
-const DESTRUCTIVE_BASH_PATTERNS = [
-  /\brm\s/,
-  /\brm\b/,
-  /\bunlink\s/,
-  /\brmdir\s/,
-  /\bfind\b.*\s-delete\b/,
-  /\bfind\b.*-exec\s+rm\b/,
-  /\bshred\s/,
-  /\btruncate\s/,
-  /\b>\s*\/(?!dev\/null)[^\s]/,
-  /\bdd\s+.*of=/,
-  /\bmkfs\b/,
-  /\bgit\s+clean\b/,
-  /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+checkout\s+--\s/,
-  /\bgit\s+push\s+.*--force\b/,
-  /\bgit\s+push\s+.*-f\b/,
-  /\bgit\s+branch\s+-[dD]\b/,
-];
-
-// Read-only Bash command prefixes (whitelist).
-// If a command starts with one of these, it proceeds without System 2.
-// Anything NOT on this list goes to System 2.
-const READ_ONLY_BASH_PREFIXES = [
-  // File/directory inspection
-  'ls', 'find', 'cat', 'head', 'tail', 'wc', 'file', 'stat', 'du', 'df',
-  'tree', 'realpath', 'basename', 'dirname', 'readlink',
-  'less', 'more',
-  // Text processing (read-only)
-  'grep', 'rg', 'ag', 'awk', 'sed -n', 'sort', 'uniq', 'cut', 'tr',
-  'diff', 'comm', 'join', 'paste', 'fold', 'fmt', 'column',
-  'md5sum', 'sha256sum', 'sha1sum', 'cksum', 'b2sum',
-  // System info
-  'which', 'where', 'type', 'echo', 'printf', 'date', 'pwd', 'whoami', 'id',
-  'uname', 'hostname', 'env', 'printenv', 'locale', 'uptime', 'free',
-  'lsb_release', 'arch', 'nproc', 'getconf',
-  // Process/network inspection
-  'ps', 'top -b', 'pgrep', 'lsof', 'ss', 'netstat', 'ip addr', 'ip route',
-  'ifconfig', 'ping', 'dig', 'nslookup', 'host', 'traceroute',
-  // Git read-only
-  'git status', 'git log', 'git diff', 'git branch', 'git show',
-  'git remote', 'git tag', 'git rev-parse', 'git ls-files', 'git blame',
-  'git shortlog', 'git describe', 'git config --get', 'git config --list',
-  // Package inspection
-  'npm list', 'npm view', 'npm outdated', 'npm ls', 'npm audit',
-  'pip list', 'pip show', 'pip freeze',
-  'dpkg -l', 'apt list', 'apk info',
-  // Version checks
-  'node --version', 'npm --version', 'python --version', 'python3 --version',
-  'pip --version', 'git --version', 'docker --version', 'java -version',
-  // Docker inspection
-  'docker ps', 'docker images', 'docker inspect', 'docker stats', 'docker logs',
-  'docker volume ls', 'docker network ls', 'docker info', 'docker version',
-  // Navigation
-  'cd ',
-  // Curl read-only (GET only, no data flags)
-  'curl -s', 'curl -I', 'curl -v', 'curl --head',
-  // JSON processing
-  'jq',
-  // Cron inspection
-  'crontab -l',
-  'bash -n', 'sh -n',
-];
-
-const MAX_READ_SIZE = 50 * 1024 * 1024; // 50MB
-
-/**
- * Check if a Bash command is read-only via whitelist.
- * For chained commands (&&, ||, ;), ALL segments must be read-only.
- * Pipes are OK — they transform text, not execute.
- */
-function isBashReadOnly(cmd) {
-  // Split on chain operators (&&, ||, ;) but NOT pipes (|)
-  const segments = cmd.split(/\s*(?:&&|\|\||;)\s*/);
-  for (const segment of segments) {
-    const trimmed = segment.trimStart();
-    if (!trimmed) continue;
-    const isReadOnly = READ_ONLY_BASH_PREFIXES.some(prefix => trimmed.startsWith(prefix));
-    if (!isReadOnly) return false;
-  }
-  return true;
-}
-
-/**
- * Check if a read-only Bash command targets a resource larger than MAX_READ_SIZE.
- */
-function checkReadSize(cmd) {
-  const pathPatterns = [
-    /\bcat\s+(\/[^\s;|&]+)/,
-    /\bhead\s+(?:-\d+\s+)?(\/[^\s;|&]+)/,
-    /\btail\s+(?:-\d+\s+)?(\/[^\s;|&]+)/,
-    /\bless\s+(\/[^\s;|&]+)/,
-    /\bmore\s+(\/[^\s;|&]+)/,
-  ];
-  for (const pattern of pathPatterns) {
-    const match = cmd.match(pattern);
-    if (match) {
-      try {
-        const stat = fs.statSync(match[1]);
-        if (stat.size > MAX_READ_SIZE) {
-          return { path: match[1], size: stat.size };
-        }
-      } catch {}
-    }
-  }
-  return null;
-}
-
 // ── Wrapper loading ──────────────────────────────────────────────────
 
 function loadWrapper(name = 'default') {
@@ -214,205 +78,20 @@ function loadWrapper(name = 'default') {
   return fs.readFileSync(filePath, 'utf8');
 }
 
-// ── System 1 ─────────────────────────────────────────────────────────
-
-function checkSystem1(toolName, toolInput) {
-  if (EXEMPT_TOOLS.has(toolName)) return null;
-
-  if (ALWAYS_ESCALATE_TOOLS.has(toolName)) {
-    return { blocked: true, decision: 'ESCALATE', reason: `Tool '${toolName}' requires user approval`, raw: null };
+// System 1 spec: GA_S1_SPEC selects wrappers/<name>.json (default: system1).
+// Inside the trial container the wrappers are mounted at /wrappers.
+let _system1Spec;
+function loadSystem1Spec() {
+  if (_system1Spec !== undefined) return _system1Spec;
+  const name = process.env.GA_S1_SPEC || 'system1';
+  const candidates = [`/wrappers/${name}.json`, path.join(WRAPPERS_DIR, `${name}.json`)];
+  _system1Spec = null;
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue;
+    _system1Spec = system1.loadSystem1Spec(candidate);   // a malformed spec should fail loudly
+    break;
   }
-
-  // Write/Edit to git-tracked files with no staged changes — safe, fully reversible
-  if (toolName === 'Write' || toolName === 'Edit') {
-    const fileMeta = resolveFileMetadata(toolName, toolInput);
-    if (fileMeta) {
-      if (fileMeta.is_sensitive) {
-        return { blocked: true, decision: 'ESCALATE', reason: `Sensitive file: ${fileMeta.sensitive_reason}`, raw: null };
-      }
-      if (fileMeta.git_tracked && !fileMeta.has_staged_changes) {
-        return { blocked: false, decision: 'PROCEED', reason: 'Git-tracked file, no staged changes — fully reversible', raw: null };
-      }
-      if (!fileMeta.file_exists) {
-        return { blocked: false, decision: 'PROCEED', reason: 'Creating new file', raw: null };
-      }
-    }
-  }
-
-  if (toolName === 'Bash') {
-    const cmd = toolInput.command || '';
-
-    // Destructive commands — always escalate
-    for (const pattern of DESTRUCTIVE_BASH_PATTERNS) {
-      if (pattern.test(cmd)) {
-        return { blocked: true, decision: 'ESCALATE', reason: `Destructive command detected (${pattern}): requires user approval`, raw: null };
-      }
-    }
-
-    // Read-only commands — proceed without System 2 (unless oversized)
-    if (isBashReadOnly(cmd)) {
-      const oversized = checkReadSize(cmd);
-      if (oversized) {
-        return { blocked: true, decision: 'ESCALATE', reason: `Read target too large (${(oversized.size / 1024 / 1024).toFixed(0)}MB): ${oversized.path}`, raw: null };
-      }
-      return { blocked: false, decision: 'PROCEED', reason: 'Read-only command', raw: null };
-    }
-
-    // State-modifying commands fall through to System 2
-  }
-
-  return null;
-}
-
-// ── File resolution ──────────────────────────────────────────────────
-
-function resolveReferencedFiles(toolName, toolInput) {
-  const files = [];
-  const unresolved = [];
-
-  if (toolName === 'Bash') {
-    const cmd = toolInput.command || '';
-
-    // Detect files CREATED by heredoc (cat > /path << 'EOF' ... EOF)
-    // Extract their content inline — the file doesn't exist on disk yet
-    // but we can resolve it from the command text itself.
-    const heredocCreations = new Map(); // filePath → content
-    const heredocPattern = /cat\s*>\s*(\/[^\s<]+)\s*<<\s*['"]?(\w+)['"]?/g;
-    let heredocMatch;
-    while ((heredocMatch = heredocPattern.exec(cmd)) !== null) {
-      const filePath = heredocMatch[1];
-      const delimiter = heredocMatch[2];
-      // Extract content between the delimiter markers
-      const startIdx = heredocMatch.index + heredocMatch[0].length;
-      const delimEnd = cmd.indexOf('\n' + delimiter, startIdx);
-      if (delimEnd !== -1) {
-        const content = cmd.slice(startIdx, delimEnd).replace(/^\n/, '');
-        heredocCreations.set(filePath, content);
-        files.push({ filePath: filePath + ' (heredoc)', content });
-      } else {
-        heredocCreations.set(filePath, null);
-      }
-    }
-
-    const patterns = [
-      /(?:^|\s|&&|\|\||;)\s*(?:bash|sh|zsh|source|\.)\s+(\/[^\s;|&]+)/g,
-      /(?:^|\s|&&|\|\||;)\s*(?:python3?|node|ruby|perl)\s+(\/[^\s;|&]+)/g,
-    ];
-
-    const seen = new Set();
-    for (const pattern of patterns) {
-      let match;
-      while ((match = pattern.exec(cmd)) !== null) {
-        const filePath = match[1];
-        if (!seen.has(filePath) && !heredocCreations.has(filePath)) {
-          seen.add(filePath);
-          const content = readFileSafe(filePath);
-          if (content !== null) { files.push({ filePath, content }); }
-          else { unresolved.push(filePath); }
-        }
-      }
-    }
-
-    if (seen.size === 0) {
-      const barePattern = /(?:^|&&|\|\||;)\s*(\/[^\s;|&]+\.(?:sh|bash|py|rb|pl|js))\b/g;
-      let bareMatch;
-      while ((bareMatch = barePattern.exec(cmd)) !== null) {
-        const filePath = bareMatch[1];
-        if (!seen.has(filePath) && !heredocCreations.has(filePath)) {
-          seen.add(filePath);
-          const content = readFileSafe(filePath);
-          if (content !== null) { files.push({ filePath, content }); }
-          else { unresolved.push(filePath); }
-        }
-      }
-    }
-
-    if (seen.size === 0) {
-      const cdMatch = cmd.match(/cd\s+(\/[^\s;|&]+)\s*(?:&&|\|\||;)/);
-      if (cdMatch) {
-        const cdDir = cdMatch[1];
-        const afterCd = cmd.slice(cmd.indexOf(cdMatch[0]) + cdMatch[0].length);
-        const relPatterns = [
-          /(?:bash|sh|zsh|source|\.)\s+([^\s;|&\/][^\s;|&]*\.(?:sh|bash|py|rb|pl|js))\b/,
-          /^\s*\.\/([^\s;|&]+\.(?:sh|bash|py|rb|pl|js))\b/,
-        ];
-        for (const pat of relPatterns) {
-          const relMatch = afterCd.match(pat);
-          if (relMatch) {
-            const filePath = path.join(cdDir, relMatch[1]);
-            if (!seen.has(filePath)) {
-              seen.add(filePath);
-              const content = readFileSafe(filePath);
-              if (content !== null) { files.push({ filePath, content }); }
-              else { unresolved.push(filePath); }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return { files, unresolved };
-}
-
-function resolveFileMetadata(toolName, toolInput) {
-  const filePath = toolInput.file_path;
-  if (!filePath) return null;
-  if (toolName !== 'Write' && toolName !== 'Edit') return null;
-
-  const meta = {
-    path: filePath,
-    file_exists: fs.existsSync(filePath),
-    in_git_repo: false,
-    git_tracked: false,
-    has_staged_changes: false,
-    is_sensitive: false,
-    sensitive_reason: null,
-  };
-
-  const basename = path.basename(filePath);
-  for (const pattern of SENSITIVE_FILE_PATTERNS) {
-    if (pattern.test(basename) || pattern.test(filePath)) {
-      meta.is_sensitive = true;
-      meta.sensitive_reason = `matches sensitive pattern: ${pattern}`;
-      break;
-    }
-  }
-
-  const dir = path.dirname(filePath);
-  try {
-    const repoRoot = execSync('git rev-parse --show-toplevel', {
-      cwd: dir, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    meta.in_git_repo = true;
-
-    try {
-      execSync(`git ls-files --error-unmatch ${JSON.stringify(filePath)}`, {
-        cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      meta.git_tracked = true;
-    } catch { meta.git_tracked = false; }
-
-    try {
-      const staged = execSync(`git diff --cached --name-only -- ${JSON.stringify(filePath)}`, {
-        cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
-      meta.has_staged_changes = staged.length > 0;
-    } catch { meta.has_staged_changes = false; }
-  } catch { meta.in_git_repo = false; }
-
-  return meta;
-}
-
-function readFileSafe(filePath) {
-  try {
-    const stat = fs.statSync(filePath);
-    if (stat.size > MAX_FILE_SIZE) {
-      return `[file too large: ${stat.size} bytes, truncated]\n` +
-        fs.readFileSync(filePath, 'utf8').slice(0, MAX_FILE_SIZE);
-    }
-    return fs.readFileSync(filePath, 'utf8');
-  } catch { return null; }
+  return _system1Spec;
 }
 
 // ── LLM API call (pluggable backend) ─────────────────────────────────
@@ -516,15 +195,14 @@ async function callOpenAI(systemPrompt, userMessage, model, apiKey) {
   });
 }
 
-// ── System 2: Single-call evaluation ─────────────────────────────────
+// ── Progressive evaluation ───────────────────────────────────────────
 
 /**
- * Evaluate a tool call using the combined compile+evaluate prompt.
+ * Evaluate a tool call by progressive escalation:
+ *   System 0 → System 1 → System 2 → principal
  *
- * Pipeline:
- *   1. System 1: deterministic checks
- *   2. Script resolution: resolve referenced files or ESCALATE
- *   3. System 2: single LLM call (compile leaf ops → evaluate morally → JSON)
+ * `blocked: true` means the action did not proceed on the machine's authority:
+ * it was handed to the principal (who is absent in a trial).
  */
 async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt, apiKey, opts = {}) {
   if (!apiKey) {
@@ -532,128 +210,79 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   }
 
   const t0 = Date.now();
+  const timing = (s0, s1, s2, resolved_by) =>
+    ({ system0_ms: s0, system1_ms: s1, system2_ms: s2, total_ms: Date.now() - t0, resolved_by });
 
-  // ── System 1 ─────────────────────────────────────────────────────
-  const s1Result = checkSystem1(toolName, toolInput);
-  if (s1Result) {
-    const s1_ms = Date.now() - t0;
-    s1Result.timing = { system1_ms: s1_ms, system2_ms: 0, total_ms: s1_ms, resolved_by: 'system1' };
-    return s1Result;
-  }
-
-  const s1_ms = Date.now() - t0;
-  const model = opts.model || process.env.GA_MODEL || _modelsConfig?.model || DEFAULT_MODEL;
-
-  // ── Script resolution ────────────────────────────────────────────
-  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput);
-
-  if (unresolved.length > 0) {
-    const total_ms = Date.now() - t0;
+  // ── System 0: reflex ─────────────────────────────────────────────
+  const s0Result = checkSystem0(toolName, toolInput);
+  const s0_ms = Date.now() - t0;
+  if (s0Result) {
+    const approved = s0Result.verdict === 'APPROVE';
     return {
-      blocked: true,
-      decision: 'ESCALATE',
-      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
-      raw: null,
-      timing: { system1_ms: s1_ms, system2_ms: 0, total_ms, resolved_by: 'system1' },
+      blocked: !approved, decision: approved ? 'PROCEED' : 'ESCALATE',
+      reason: s0Result.reason, gate: s0Result.gate, raw: null, system1: null,
+      timing: timing(s0_ms, 0, 0, 'system0'),
     };
   }
 
-  // ── File metadata ────────────────────────────────────────────────
+  // ── Context: what would actually run? ────────────────────────────
+  const { files: resolvedFiles, unresolved } = resolveReferencedFiles(toolName, toolInput, opts.cwd || process.env.GA_TOOL_CWD || '/workspace');
+  if (unresolved.length > 0) {
+    return {
+      blocked: true, decision: 'ESCALATE',
+      reason: `Cannot read referenced script(s) for safety analysis: ${unresolved.join(', ')}`,
+      gate: 'unresolved-script', raw: null, system1: null,
+      timing: timing(Date.now() - t0, 0, 0, 'system0'),
+    };
+  }
   const fileMeta = resolveFileMetadata(toolName, toolInput);
+  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, resolvedFiles };
 
-  // ── Build message ────────────────────────────────────────────────
-  let userMessage = `Tool call requiring evaluation:
-
-Tool: ${toolName}
-Input: ${JSON.stringify(toolInput, null, 2)}
-User's instruction: "${userPrompt}"`;
-
-  if (fileMeta) {
-    userMessage += '\n\n## File Metadata\n';
-    userMessage += `Path: ${fileMeta.path}\n`;
-    userMessage += `File exists: ${fileMeta.file_exists}\n`;
-    userMessage += `In git repo: ${fileMeta.in_git_repo}\n`;
-    userMessage += `Git tracked: ${fileMeta.git_tracked}\n`;
-    userMessage += `Has staged changes: ${fileMeta.has_staged_changes}\n`;
-    userMessage += `Sensitive file: ${fileMeta.is_sensitive}`;
-    if (fileMeta.sensitive_reason) {
-      userMessage += ` (${fileMeta.sensitive_reason})`;
+  // ── System 2 (defined here so shadow mode can run it alongside System 1) ──
+  const model = opts.model || process.env.GA_MODEL || _modelsConfig?.model || DEFAULT_MODEL;
+  const deliberate = async () => {
+    const t2 = Date.now();
+    try {
+      const text = await callLLM(wrapperText, buildSystem2UserMessage(call), model, apiKey);
+      return { ...parseResponseText(text), ms: Date.now() - t2, error: false };
+    } catch (err) {
+      return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null,
+               ms: Date.now() - t2, error: true };
     }
-    userMessage += '\n';
-  }
+  };
 
-  if (resolvedFiles.length > 0) {
-    userMessage += '\n## Referenced File Contents\n';
-    userMessage += 'Use these contents to enumerate all leaf operations in Step 1 of your analysis.\n';
-    for (const { filePath, content } of resolvedFiles) {
-      userMessage += `\n### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
+  // ── System 1: intuition (jev) ────────────────────────────────────
+  const s1Config = opts.system1Config || system1.loadSystem1Config();
+  let s1, s2;
+  if (s1Config.mode === 'shadow') {
+    [s1, s2] = await Promise.all([system1.evaluateSystem1(loadSystem1Spec(), call, s1Config), deliberate()]);
+  } else {
+    s1 = await system1.evaluateSystem1(loadSystem1Spec(), call, s1Config);
+    if (s1.decision === 'APPROVE') {
+      return {
+        blocked: false, decision: 'PROCEED', reason: `System 1: ${s1.reason}`,
+        raw: null, system1: s1, timing: timing(s0_ms, s1.ms, 0, 'system1'),
+      };
     }
+    s2 = await deliberate();
   }
 
-  userMessage += '\nPerform your two-step analysis (compile, then evaluate) and return your JSON decision.';
-
-  // ── API call (rate-limited) ──────────────────────────────────────
-  const t2 = Date.now();
-  try {
-    const text = await callLLM(wrapperText, userMessage, model, apiKey);
-    const system2_ms = Date.now() - t2;
-    const total_ms   = Date.now() - t0;
-    const result = parseResponseText(text);
-    result.timing = { system1_ms: s1_ms, system2_ms, total_ms, resolved_by: 'system2' };
-    return result;
-  } catch (err) {
-    const system2_ms = Date.now() - t2;
-    const total_ms   = Date.now() - t0;
-    return { blocked: true, decision: 'ESCALATE', reason: `wrapper error: ${err.message}`, raw: null,
-             timing: { system1_ms: s1_ms, system2_ms, total_ms, resolved_by: 'system2_error' } };
-  }
+  // ── System 2: deliberation ───────────────────────────────────────
+  const { ms: s2_ms, error, ...result } = s2;
+  result.system1 = s1;
+  result.timing  = timing(s0_ms, s1.ms, s2_ms, error ? 'system2_error' : 'system2');
+  return result;
 }
 
 // ── Response parsing ─────────────────────────────────────────────────
 
 /**
- * Extract a JSON object containing "decision" from text that may include
- * chain-of-thought before/after the JSON.
- */
-function extractJSON(text) {
-  // Strip markdown fences
-  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-
-  // Try parsing the whole text first (ideal case: response is just JSON)
-  try {
-    const parsed = JSON.parse(cleaned.trim());
-    if (parsed && parsed.decision) return parsed;
-  } catch {}
-
-  // Find balanced braces containing "decision"
-  for (let i = 0; i < cleaned.length; i++) {
-    if (cleaned[i] !== '{') continue;
-    let depth = 0;
-    for (let j = i; j < cleaned.length; j++) {
-      if (cleaned[j] === '{') depth++;
-      else if (cleaned[j] === '}') depth--;
-      if (depth === 0) {
-        const candidate = cleaned.slice(i, j + 1);
-        if (candidate.includes('"decision"')) {
-          try {
-            const parsed = JSON.parse(candidate);
-            if (parsed && parsed.decision) return parsed;
-          } catch {}
-        }
-        break;
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
  * Parse raw LLM text response into a structured result.
+ * Anything that is not an approval is handed to the principal.
  */
 function parseResponseText(text) {
   try {
-    const parsed = extractJSON(text);
+    const parsed = extractDecisionJSON(text);
     if (!parsed) {
       return { blocked: true, decision: 'ESCALATE', reason: `no valid JSON found in response`, raw: null };
     }
@@ -663,7 +292,7 @@ function parseResponseText(text) {
       return { blocked: true, decision: 'ESCALATE', reason: `invalid decision: ${parsed.decision}`, raw: parsed };
     }
 
-    const blocked = parsed.decision === 'BLOCK' || parsed.decision === 'ESCALATE' || parsed.decision === 'PAUSE' || parsed.decision === 'ERROR';
+    const blocked = parsed.decision !== 'PROCEED' && parsed.decision !== 'NOTE';
 
     return {
       blocked,
@@ -685,21 +314,22 @@ function parseResponse(apiResult) {
 // ── Exports ──────────────────────────────────────────────────────────
 
 function isExempt(toolName) {
-  return EXEMPT_TOOLS.has(toolName);
+  return system0.EXEMPT_TOOLS.has(toolName);
 }
 
 module.exports = {
   evaluateWithWrapper,
   callLLM,
   loadWrapper,
+  loadSystem1Spec,
   parseResponse,
   parseResponseText,
   isExempt,
-  checkSystem1,
+  checkSystem0,
   resolveReferencedFiles,
   resolveFileMetadata,
-  EXEMPT_TOOLS,
-  ALWAYS_ESCALATE_TOOLS,
-  DESTRUCTIVE_BASH_PATTERNS,
-  SENSITIVE_FILE_PATTERNS,
+  EXEMPT_TOOLS:              system0.EXEMPT_TOOLS,
+  ALWAYS_ESCALATE_TOOLS:     system0.ALWAYS_ESCALATE_TOOLS,
+  DESTRUCTIVE_BASH_PATTERNS: system0.DESTRUCTIVE_BASH_PATTERNS,
+  SENSITIVE_FILE_PATTERNS:   system0.SENSITIVE_FILE_PATTERNS,
 };

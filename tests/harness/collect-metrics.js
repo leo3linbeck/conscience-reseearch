@@ -446,7 +446,7 @@ reportFailures('GA Alternative (D)', 'D', metricsD);
 
 // ── GA Latency ──────────────────────────────────────────────────────
 // Only measure GA conditions (C/D). The question is: how much additional
-// latency does GA add? System 1 (deterministic) vs System 2 (LLM call).
+// latency does GA add? System 0 (reflex) vs System 1 (jev) vs System 2 (LLM call).
 const gaCondColumns = condColumns.filter(c => c.key === 'C' || c.key === 'D');
 
 function formatDuration(ms) {
@@ -459,8 +459,21 @@ if (gaCondColumns.length > 0) {
   lines.push('## GA Latency (Additional Processing Time)');
   lines.push('');
   lines.push('Measures only Guardian Angel evaluation time — the additional latency GA adds per scenario.');
-  lines.push('System 1 = deterministic checks (fast). System 2 = LLM evaluation call (slower).');
+  lines.push('System 0 = reflex patterns (deterministic). System 1 = jev typed judgments. System 2 = LLM deliberation.');
   lines.push('');
+
+  // Results recorded before the System 0/1/2 split used "system1" for the
+  // deterministic tier and had no jev tier. Map them onto the current names.
+  const normalizeTiming = (t) => {
+    if (!t || t.system0_ms !== undefined) return t;
+    return {
+      ...t,
+      system0_ms: t.system1_ms || 0,
+      system1_ms: 0,
+      ...(t.resolved_by === 'system1' ? { resolved_by: 'system0' } : {}),
+      ...(t.s1_only !== undefined ? { s0_only: t.s1_only, s1_only: 0 } : {}),
+    };
+  };
 
   // Collect per-scenario GA timing
   const gaTimingData = {};
@@ -471,18 +484,20 @@ if (gaCondColumns.length > 0) {
       if (!r) continue;
       // Use aggregated ga_timing from run-scenario if available
       if (r.ga_timing) {
-        gaTimingData[scenario][col.key] = r.ga_timing;
+        gaTimingData[scenario][col.key] = normalizeTiming(r.ga_timing);
       } else {
         // Fall back: aggregate from per-attempt ga_timing fields
         const timings = (r.tool_attempts || [])
           .filter(a => a.ga_timing)
-          .map(a => a.ga_timing);
+          .map(a => normalizeTiming(a.ga_timing));
         if (timings.length > 0) {
           gaTimingData[scenario][col.key] = {
             total_ms:   timings.reduce((s, t) => s + t.total_ms, 0),
+            system0_ms: timings.reduce((s, t) => s + t.system0_ms, 0),
             system1_ms: timings.reduce((s, t) => s + t.system1_ms, 0),
             system2_ms: timings.reduce((s, t) => s + t.system2_ms, 0),
             calls:      timings.length,
+            s0_only:    timings.filter(t => t.resolved_by === 'system0').length,
             s1_only:    timings.filter(t => t.resolved_by === 'system1').length,
             s2_calls:   timings.filter(t => t.resolved_by === 'system2' || t.resolved_by === 'system2_error').length,
           };
@@ -492,8 +507,8 @@ if (gaCondColumns.length > 0) {
   }
 
   // Per-scenario table (includes run times for A + C/D, and % increase over A)
-  const gaTimeHeaders = gaCondColumns.map(c => `${c.label} Run Time | GA Time | % Δ vs A | S1 | S2 | Calls`).join(' | ');
-  const gaTimeDashes  = gaCondColumns.map(() => '---: | ---: | ---: | ---: | ---: | ---:').join(' | ');
+  const gaTimeHeaders = gaCondColumns.map(c => `${c.label} Run Time | GA Time | % Δ vs A | S0 | S1 | S2 | Calls`).join(' | ');
+  const gaTimeDashes  = gaCondColumns.map(() => '---: | ---: | ---: | ---: | ---: | ---: | ---:').join(' | ');
   lines.push(`| Scenario | A Run Time | ${gaTimeHeaders} |`);
   lines.push(`|----------|---:|${gaTimeDashes}|`);
 
@@ -505,9 +520,9 @@ if (gaCondColumns.length > 0) {
       const r = scenarioMap[scenario]?.[c.key];
       const runTime = r?.duration_ms;
       const runTimeStr = formatDuration(runTime);
-      if (!t) return `${runTimeStr} | — | — | — | — | —`;
+      if (!t) return `${runTimeStr} | — | — | — | — | — | —`;
       const deltaPct = (runTime && aRunTime && aRunTime > 0) ? (((runTime - aRunTime) / aRunTime) * 100).toFixed(1) + '%' : '—';
-      return `${runTimeStr} | ${formatDuration(t.total_ms)} | ${deltaPct} | ${formatDuration(t.system1_ms)} | ${formatDuration(t.system2_ms)} | ${t.calls}`;
+      return `${runTimeStr} | ${formatDuration(t.total_ms)} | ${deltaPct} | ${formatDuration(t.system0_ms)} | ${formatDuration(t.system1_ms)} | ${formatDuration(t.system2_ms)} | ${t.calls}`;
     }).join(' | ');
     lines.push(`| ${scenario} | ${aRunTimeStr} | ${cells} |`);
   }
@@ -533,15 +548,17 @@ if (gaCondColumns.length > 0) {
 
   const gaStats = {};
   for (const col of gaCondColumns) {
-    const totals = [], s1s = [], s2s = [], callCounts = [], s1Only = [], s2Calls = [], runTimes = [], deltaPcts = [];
+    const totals = [], s0s = [], s1s = [], s2s = [], callCounts = [], s0Only = [], s1Only = [], s2Calls = [], runTimes = [], deltaPcts = [];
     for (const scenario of allScenarios) {
       const t = gaTimingData[scenario]?.[col.key];
       const r = scenarioMap[scenario]?.[col.key];
       if (!t) continue;
       totals.push(t.total_ms);
-      s1s.push(t.system1_ms);
-      s2s.push(t.system2_ms);
+      s0s.push(t.system0_ms || 0);
+      s1s.push(t.system1_ms || 0);
+      s2s.push(t.system2_ms || 0);
       callCounts.push(t.calls);
+      s0Only.push(t.s0_only || 0);
       s1Only.push(t.s1_only || 0);
       s2Calls.push(t.s2_calls || 0);
       if (r?.duration_ms && r.duration_ms > 0) {
@@ -553,8 +570,9 @@ if (gaCondColumns.length > 0) {
       }
     }
     gaStats[col.key] = {
-      total: statsHelper(totals), system1: statsHelper(s1s), system2: statsHelper(s2s),
-      calls: statsHelper(callCounts), s1Only: s1Only.reduce((a, b) => a + b, 0),
+      total: statsHelper(totals), system0: statsHelper(s0s), system1: statsHelper(s1s), system2: statsHelper(s2s),
+      calls: statsHelper(callCounts), s0Only: s0Only.reduce((a, b) => a + b, 0),
+      s1Only: s1Only.reduce((a, b) => a + b, 0),
       s2Calls: s2Calls.reduce((a, b) => a + b, 0),
       runTime: statsHelper(runTimes), deltaPct: statsHelper(deltaPcts),
     };
@@ -579,10 +597,12 @@ if (gaCondColumns.length > 0) {
   gaRow('Max GA time / scenario', '—', s => formatDuration(s.total.max));
   gaRow('Min GA time / scenario', '—', s => formatDuration(s.total.min));
   gaRow('Std Dev', '—', s => formatDuration(s.total.stddev));
+  gaRow('Mean System 0 / scenario', '—', s => formatDuration(s.system0.mean));
   gaRow('Mean System 1 / scenario', '—', s => formatDuration(s.system1.mean));
   gaRow('Mean System 2 / scenario', '—', s => formatDuration(s.system2.mean));
-  gaRow('Total S1-only resolutions', '—', s => s.s1Only);
-  gaRow('Total S2 LLM calls', '—', s => s.s2Calls);
+  gaRow('Resolved by System 0 (reflex)', '—', s => s.s0Only);
+  gaRow('Resolved by System 1 (jev)', '—', s => s.s1Only);
+  gaRow('Reached System 2 (LLM calls)', '—', s => s.s2Calls);
   gaRow('Mean GA calls / scenario', '—', s => s.calls.mean.toFixed(1));
   lines.push('');
 }

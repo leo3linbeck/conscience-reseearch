@@ -206,6 +206,7 @@ class TrialAPIClient {
           attempt.ga_reason   = gaResult.reason;
           attempt.ga_raw      = gaResult.raw;
           attempt.ga_timing   = gaResult.timing || null;
+          attempt.ga_system1  = gaResult.system1 || null;
 
           if (gaResult.blocked) {
             blocked = true;
