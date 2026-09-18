@@ -26,12 +26,13 @@ const { withRateLimit } = require('./rate-limiter');
 
 const system0 = require('./system0');
 const system1 = require('./system1');
-const { resolveReferencedFiles, buildSystem2UserMessage, extractDecisionJSON } = require('./context');
+const { resolveReferencedFiles, assessDownloads, buildSystem2UserMessage, extractDecisionJSON } = require('./context');
 
 const { checkSystem0, resolveFileMetadata } = system0;
 
 const DEFAULT_MODEL   = 'claude-haiku-4-5-20251001';
-const API_TIMEOUT     = 12_000;
+const API_TIMEOUT     = 20_000;   // Sonnet-class models need 9-12s for a full verdict
+const MAX_TOKENS      = 2048;
 const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
 
 // ── LLM Backend Configuration ────────────────────────────────────────
@@ -119,31 +120,51 @@ async function callLLM(systemPrompt, userMessage, model, apiKey) {
   }
 }
 
+const _rejectedParams = new Map();   // model → optional parameters it has refused
+
 async function callAnthropic(systemPrompt, userMessage, model, apiKey) {
   return withRateLimit(async () => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
     try {
-      const response = await fetch(`${GA_API_BASE}/v1/messages`, {
+      const post = (body) => fetch(`${GA_API_BASE}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
         },
-        body: JSON.stringify({
-          model,
-          max_tokens: 1024,
-          temperature: 0,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userMessage }],
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
+      // Two optional parameters, each dropped if the model rejects it:
+      //   temperature 0 — repeatable verdicts; newer models refuse the parameter
+      //                   ("`temperature` is deprecated for this model").
+      //   thinking off  — the prompt already structures the reasoning (Phase 1,
+      //                   Phase 2, JSON). Models that think by default otherwise
+      //                   spend the whole token budget before writing a verdict.
+      const body = { model, max_tokens: MAX_TOKENS, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] };
+      const dropped = _rejectedParams.get(model) || new Set();
+      if (!dropped.has('temperature')) body.temperature = 0;
+      if (!dropped.has('thinking'))    body.thinking = { type: 'disabled' };
+
+      let response = await post(body);
+      for (let retry = 0; retry < 2 && response.status === 400; retry++) {
+        const detail = await response.text();
+        const param = ['temperature', 'thinking'].find(p => p in body && new RegExp(p, 'i').test(detail));
+        if (!param) throw new Error(`API error: 400 ${detail.slice(0, 200)}`);
+        dropped.add(param); _rejectedParams.set(model, dropped);
+        delete body[param];
+        response = await post(body);
+      }
+
       if (!response.ok) throw new Error(`API error: ${response.status}`);
       const result = await response.json();
-      return result.content[0].text;
+      // A thinking block may precede the text block
+      const textBlock = (result.content || []).find(b => b.type === 'text');
+      if (!textBlock) throw new Error(`no text in response (stop_reason: ${result.stop_reason})`);
+      return textBlock.text;
     } finally {
       clearTimeout(timeout);
     }
@@ -175,7 +196,7 @@ async function callOpenAI(systemPrompt, userMessage, model, apiKey) {
         ],
       };
       // Ollama doesn't use max_tokens; OpenAI-compatible uses max_tokens
-      if (!isOllama) body.max_tokens = 1024;
+      if (!isOllama) body.max_tokens = MAX_TOKENS;
 
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -239,6 +260,15 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   if (unresolved.length > 0) {
     reflexFlags.push(`the command runs script(s) whose contents could not be read: ${unresolved.join(', ')}`);
   }
+  // Will a download fit on disk? Deterministic, so it is System 0's verdict.
+  const toolCwd = opts.cwd || process.env.GA_TOOL_CWD || '/workspace';
+  const download = await assessDownloads(toolName, toolInput, toolCwd);
+  if (download.verdict === 'REJECT') {
+    trail[0] = { tier: 'system0', verdict: 'REJECT', reason: download.reason, gate: 'download-exceeds-disk' };
+    return finish('system0', 'REJECT', download.reason, { gate: 'download-exceeds-disk' }, timing(Date.now() - t0, 0, 0, 'system0'));
+  }
+  reflexFlags.push(...download.flags);
+
   const fileMeta = resolveFileMetadata(toolName, toolInput);
   const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, resolvedFiles, reflexFlags, history: opts.history || [] };
 

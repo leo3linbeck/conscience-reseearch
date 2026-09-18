@@ -60,8 +60,9 @@ const GA_MODELS_PATH       = path.join(HOOK_DIR, '.ga-models.json');
 const GA_API_KEY_PATH      = path.join(HOOK_DIR, '.ga-api-key');
 const PENDING_TIMEOUT_MS   = 300_000;  // 5 min — escalation awaits approval
 const APPROVAL_WINDOW_MS   = 30_000;   // 30s  — approved action window
-const SYSTEM2_API_TIMEOUT  = 12_000;   // 12s abort for LLM call
-const WATCHDOG_MS          = 18_000;   // whole evaluation; hook timeout is 20s
+const SYSTEM2_API_TIMEOUT  = 20_000;   // 20s abort for LLM call (Sonnet-class models need 9-12s)
+const SYSTEM2_MAX_TOKENS   = 2048;
+const WATCHDOG_MS          = 27_000;   // whole evaluation; hook timeout is 30s
 const SYSTEM2_MODEL        = 'claude-haiku-4-5-20251001';  // fallback if no config
 const TRANSCRIPT_TAIL      = 512 * 1024;
 
@@ -370,22 +371,32 @@ async function invokeSystem2(call, intuition) {
     let response;
 
     if (format === 'anthropic') {
-      response = await fetch(`${endpoint}/v1/messages`, {
+      const post = (body) => fetch(`${endpoint}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': key,
           'anthropic-version': '2023-06-01',
         },
-        body: JSON.stringify({
-          model,
-          max_tokens: 1024,
-          temperature: 0,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userMessage }],
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
+
+      // Two optional parameters, each dropped if the model rejects it:
+      //   temperature 0 — repeatable verdicts; newer models refuse the parameter.
+      //   thinking off  — the prompt already structures the reasoning. Models that
+      //                   think by default otherwise spend the whole token budget
+      //                   before writing a verdict.
+      const body = { model, max_tokens: SYSTEM2_MAX_TOKENS, temperature: 0, thinking: { type: 'disabled' },
+                     system: systemPrompt, messages: [{ role: 'user', content: userMessage }] };
+      response = await post(body);
+      for (let retry = 0; retry < 2 && response.status === 400; retry++) {
+        const detail = await response.clone().text();
+        const param = ['temperature', 'thinking'].find(p => p in body && new RegExp(p, 'i').test(detail));
+        if (!param) break;
+        delete body[param];
+        response = await post(body);
+      }
     } else {
       // OpenAI-compatible (openai, ollama, together, vLLM, etc.)
       const baseUrl = endpoint.replace(/\/+$/, '');
@@ -403,7 +414,7 @@ async function invokeSystem2(call, intuition) {
           { role: 'user', content: userMessage },
         ],
       };
-      if (isOllama) body.stream = false; else body.max_tokens = 1024;
+      if (isOllama) body.stream = false; else body.max_tokens = SYSTEM2_MAX_TOKENS;
 
       response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
     }
@@ -419,7 +430,7 @@ async function invokeSystem2(call, intuition) {
 
 function parseSystem2Response(apiResult) {
   try {
-    const text = apiResult.content?.[0]?.text               // Anthropic
+    const text = (Array.isArray(apiResult.content) ? apiResult.content.find(b => b.type === 'text')?.text : undefined)   // Anthropic (a thinking block may come first)
               ?? apiResult.message?.content                 // Ollama
               ?? apiResult.choices?.[0]?.message?.content;  // OpenAI
     if (typeof text !== 'string') return undecided('System 2: unexpected response format');
@@ -474,6 +485,14 @@ function parseSystem2Response(apiResult) {
   if (unresolved.length > 0) {
     reflexFlags.push(`the command runs script(s) whose contents could not be read: ${unresolved.join(', ')}`);
   }
+  // Will a download fit on disk? Deterministic, so it is System 0's verdict.
+  const download = await context.assessDownloads(toolName, toolInput, callCwd || process.cwd());
+  if (download.verdict === 'REJECT') {
+    trail.system0 = `REJECT [download-exceeds-disk]: ${download.reason}`;
+    reject('System 0', download.reason);
+  }
+  reflexFlags.push(...download.flags);
+
   const { request, history } = readTranscript();
 
   const call = {
