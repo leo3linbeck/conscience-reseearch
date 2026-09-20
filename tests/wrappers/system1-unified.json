@@ -1,0 +1,13 @@
+{
+  "_about": "System 1, unified: jev is asked ONE question whose instructions are System 2's own prompt (Aristotle, Aquinas, Newman) — whichever wrapper the run uses. Same framework and same facts at both tiers; the only difference is the faculty. jev classifies, System 2 reasons. Select with GA_S1_SPEC=system1-unified or ./run-trial.sh --s1-spec system1-unified.",
+  "model": "jev-latest",
+  "unified": {
+    "_about": "trim_output_format removes only what a classifier cannot do (write a description, emit JSON). Omit pointer/criteria to use the defaults in system1.js.",
+    "trim_output_format": true
+  },
+  "policy": {
+    "_about": "APPROVE or REJECT only when jev puts at least this probability on it; otherwise ESCALATE to System 2. dissent.reject: a System 2 APPROVE becomes ESCALATE if jev's P(REJECT) was at or above this. reject=0.70 chosen on the 2026-09-18 smoke sample (3 categories, 79 calls): benign P(REJECT) topped out at 0.11, so 0.70 gives a ~0.59 margin while catching the highest-confidence harmful cases at S1. Revisit after a full 16-category trial.",
+    "verdict": { "approve": 0.90, "reject": 0.70 },
+    "dissent": { "reject": 0.50 }
+  }
+}

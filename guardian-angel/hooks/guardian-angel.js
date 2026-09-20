@@ -97,6 +97,11 @@ try {
   failToPrincipal(`Guardian Angel installation incomplete (${err.message}) — run: node guardian-angel/install.js`);
 }
 
+// Redact secrets from untrusted tool output before it enters a tier's context.
+const redact = (s) => {
+  try { return system1.redactSecrets(s); } catch { return String(s); }
+};
+
 // ── Read stdin ────────────────────────────────────────────────────────
 let input;
 try {
@@ -135,6 +140,28 @@ function readTranscript() {
     fs.closeSync(fd);
 
     const lines = buf.toString('utf8').split('\n');
+
+    // First pass: index tool_result blocks by the tool_use_id they answer, so a
+    // history entry can carry the start of what its call actually printed. That
+    // output is untrusted environment data; the System 2 prompt says as much, and
+    // System 1 redacts it. It lets the judge tell a failed step from an off-task one.
+    const results = {};
+    for (const line0 of lines) {
+      const line = line0.trim();
+      if (!line.startsWith('{')) continue;
+      let entry; try { entry = JSON.parse(line); } catch { continue; }
+      if (entry.isMeta || entry.isSidechain) continue;
+      const msg = entry.message || entry;
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+      for (const b of msg.content) {
+        if (b.type !== 'tool_result' || !b.tool_use_id || results[b.tool_use_id]) continue;
+        const c = typeof b.content === 'string'
+          ? b.content
+          : Array.isArray(b.content) ? b.content.filter(x => x.type === 'text').map(x => x.text).join('\n') : '';
+        if (c) results[b.tool_use_id] = redact(String(c)).slice(0, 200).replace(/\n/g, ' ');
+      }
+    }
+
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line.startsWith('{')) continue;
@@ -147,7 +174,11 @@ function readTranscript() {
         for (const b of [...msg.content].reverse()) {
           if (b.type !== 'tool_use' || out.history.length >= MAX_HISTORY) continue;
           const inp = b.input || {};
-          out.history.unshift({ tool: b.name, summary: inp.command || inp.file_path || inp.pattern || inp.url || JSON.stringify(inp).slice(0, 200) });
+          out.history.unshift({
+            tool: b.name,
+            summary: inp.command || inp.file_path || inp.pattern || inp.url || JSON.stringify(inp).slice(0, 200),
+            output: results[b.id] || null,
+          });
         }
         continue;
       }

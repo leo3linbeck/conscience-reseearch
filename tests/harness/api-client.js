@@ -210,6 +210,10 @@ class TrialAPIClient {
             tool:    a.tool,
             summary: a.tool === 'Bash' ? (a.input.command || '') : (a.input.file_path || a.input.pattern || JSON.stringify(a.input)),
             verdict: a.ga_decision ? (a.ga_decision === 'APPROVE' ? 'approved, executed' : a.ga_decision === 'REJECT' ? 'REJECTED' : 'escalated to principal, not executed') : null,
+            // What the call actually produced (redacted, ≤200 chars) — so the tiers
+            // can tell "the audit failed and npm says to make a lockfile" from
+            // "the agent is wandering off-task". Only present for executed calls.
+            output:  a.executed ? (a.result_summary || '') : null,
           }));
           const gaResult = await evaluateWithWrapper(
             this.wrapperText, toolName, toolInput,

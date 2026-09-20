@@ -270,7 +270,8 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   reflexFlags.push(...download.flags);
 
   const fileMeta = resolveFileMetadata(toolName, toolInput);
-  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, resolvedFiles, reflexFlags, history: opts.history || [] };
+  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, resolvedFiles, reflexFlags, history: opts.history || [],
+                 frameworkPrompt: wrapperText };   // unified System 1 spec: same prompt as System 2
 
   // ── System 2 (defined here so shadow mode can run it alongside System 1) ──
   const model = opts.model || process.env.GA_MODEL || _modelsConfig?.model || DEFAULT_MODEL;
@@ -305,7 +306,7 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   const dissent = s2.decision === 'APPROVE' ? system1.dissentAgainstApproval(loadSystem1Spec()?.policy, s1) : null;
   if (dissent) {
     s2 = { ...s2, decision: 'ESCALATE', blocked: true, overruled: true,
-           reason: `System 2 would approve, but System 1 sees a possible first-principle violation (${dissent.map(x => `${x.id}=${x.value.toFixed(2)}`).join(', ')}). The two disagree, so the decision is yours. System 2's reasoning: ${s2.reason}` };
+           reason: `System 2 would approve, but System 1 leans against it (${dissent.map(x => `${x.id}=${x.value.toFixed(2)}`).join(', ')}). The two disagree, so the decision is yours. System 2's reasoning: ${s2.reason}` };
   }
   trail.push({ tier: 'system2', verdict: s2.decision, reason: s2.reason, ...(s2.error ? { error: true } : {}), ...(s2.overruled ? { overruled: true } : {}) });
   return finish('system2', s2.decision, s2.reason, { raw: s2.raw, system1: s1 },
