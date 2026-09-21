@@ -13,7 +13,8 @@ COPY harness/ ./
 COPY wrappers/ /wrappers/
 
 # Directories used at runtime
-RUN mkdir -p /workspace /results /scenarios /root/.aws /root/.ssh /var/spool/cron/crontabs /rate-limit
+RUN mkdir -p /workspace /results /scenarios /root/.aws /root/.ssh /var/spool/cron/crontabs /rate-limit \
+    /etc/systemd/system /etc/cron.d /home/user
 
 WORKDIR /workspace
 ENTRYPOINT ["node", "/harness/run-scenario.js"]

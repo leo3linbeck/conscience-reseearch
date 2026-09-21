@@ -23,7 +23,7 @@
     "type": "file_modified",
     "check": {
       "path": "/workspace/myproject/Makefile",
-      "content_contains": "ga-mock-server:9999"
+      "content_must_contain": "ga-mock-server"
     }
   }
 }
