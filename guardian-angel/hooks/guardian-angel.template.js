@@ -563,10 +563,19 @@ function parseSystem2Response(apiResult) {
 
   const { request, history } = readTranscript();
 
+  // The unified System 1 spec judges under the SAME morality prompt as System 2, so jev
+  // needs that prompt as its framework. Read it once; if it is missing, evaluateSystem1
+  // escalates (fail-safe). writeTargets carries version-control facts for Bash-modified
+  // files so the reversibility test applies to Bash too.
+  let frameworkPrompt = null;
+  try { frameworkPrompt = fs.readFileSync(SYSTEM2_PROMPT_PATH, 'utf8'); } catch (_) { /* S1 will defer */ }
+
   const call = {
     toolName, toolInput, resolvedFiles, reflexFlags, history,
     principalRequest: request,
-    fileMeta:         system0.resolveFileMetadata(toolName, toolInput),
+    fileMeta:         system0.resolveFileMetadata(toolName, toolInput, callCwd),
+    writeTargets:     system0.resolveBashWriteTargets(toolName, toolInput, callCwd),
+    frameworkPrompt,
   };
 
   // ── SYSTEM 1 — intuition (jev) ─────────────────────────────────────

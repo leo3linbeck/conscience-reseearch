@@ -120,7 +120,7 @@ const REPO_HOOK    = path.join(__dirname, 'hooks', 'guardian-angel.js');
 
 const MANIFEST = [
   { src: path.join(WRAPPERS_DIR, 'default.txt'),  dst: path.join(HOOKS_DIR, 'ga-system2-prompt.txt'), label: 'System 2 prompt' },
-  { src: path.join(WRAPPERS_DIR, 'system1.json'), dst: path.join(HOOKS_DIR, 'ga-system1.json'),       label: 'System 1 questions + policy' },
+  { src: path.join(WRAPPERS_DIR, 'system1-unified.json'), dst: path.join(HOOKS_DIR, 'ga-system1.json'), label: 'System 1 spec (unified: jev judges under the same morality prompt as System 2)' },
   { src: path.join(HARNESS_DIR, 'system0.js'),    dst: path.join(GA_LIB_DIR, 'system0.js'),           label: 'System 0 module (reflex)' },
   { src: path.join(HARNESS_DIR, 'system1.js'),    dst: path.join(GA_LIB_DIR, 'system1.js'),           label: 'System 1 module (jev)' },
   { src: path.join(HARNESS_DIR, 'context.js'),    dst: path.join(GA_LIB_DIR, 'context.js'),           label: 'Context module' },
@@ -370,7 +370,7 @@ async function install() {
   });
 
   // A malformed System 1 spec would silently defer everything — catch it here.
-  JSON.parse(files.find(f => f.label.startsWith('System 1 questions')).content);
+  JSON.parse(files.find(f => f.label.startsWith('System 1 spec')).content);
 
   for (const file of files) {
     const exists = fs.existsSync(file.dst);

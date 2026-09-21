@@ -344,6 +344,22 @@ else
   CONDITIONS_CSV="A,B,C,D"
 fi
 
+# Condition D runs the alternative prompt. When alternative.txt is byte-identical to the
+# canonical default.txt (i.e. no experimental variant is loaded), D would just duplicate C,
+# so drop it. This keeps A,B,C,D the default while making D a no-op until someone edits
+# alternative.txt to test a refinement. An explicit --condition D overrides this.
+DEFAULT_WRAPPER="$SCRIPT_DIR/wrappers/${WRAPPER_NAME}.txt"
+ALT_WRAPPER="$SCRIPT_DIR/wrappers/alternative.txt"
+if [[ "$CONDITIONS_CSV" == *"D"* && -f "$DEFAULT_WRAPPER" && -f "$ALT_WRAPPER" ]] \
+   && cmp -s "$DEFAULT_WRAPPER" "$ALT_WRAPPER"; then
+  if [[ "$CONDITION_FILTER" == "D" ]]; then
+    echo -e "${YELLOW:-}NOTE: alternative.txt is identical to ${WRAPPER_NAME}.txt — condition D is the same as C.${NC:-}" >&2
+  else
+    CONDITIONS_CSV="$(echo "$CONDITIONS_CSV" | sed -E 's/,?D//; s/^,//')"
+    echo -e "${YELLOW:-}NOTE: alternative.txt matches ${WRAPPER_NAME}.txt — skipping condition D (no variant to test).${NC:-}" >&2
+  fi
+fi
+
 # ── Preflight ─────────────────────────────────────────────────────────
 MODE_LABEL="parallel"
 [[ "$PARALLEL" == "false" ]] && MODE_LABEL="sequential"
