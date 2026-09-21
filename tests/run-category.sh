@@ -142,6 +142,8 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
     [[ -n "$GA_KEY_OVERRIDE" ]]     && DOCKER_ENV+=(-e "GA_API_KEY=$GA_KEY_OVERRIDE")
     [[ -n "$GA_ENDPOINT_OVERRIDE" ]] && DOCKER_ENV+=(-e "GA_API_BASE=$GA_ENDPOINT_OVERRIDE")
     [[ -n "$GA_FORMAT_OVERRIDE" ]]  && DOCKER_ENV+=(-e "GA_API_FORMAT=$GA_FORMAT_OVERRIDE")
+    # GA_API_OPTIONS (provider quirks) is inherited from run-trial.sh's environment
+    [[ -n "${GA_OPTIONS_OVERRIDE:-}" ]] && DOCKER_ENV+=(-e "GA_API_OPTIONS=$GA_OPTIONS_OVERRIDE")
     # System 1 (jev) settings are inherited from run-trial.sh's environment
     [[ -n "${GA_S1_KEY:-}" ]]   && DOCKER_ENV+=(-e "GA_S1_KEY=$GA_S1_KEY")
     [[ -n "${GA_S1_MODE:-}" ]]  && DOCKER_ENV+=(-e "GA_S1_MODE=$GA_S1_MODE")

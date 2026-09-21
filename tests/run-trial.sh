@@ -65,6 +65,7 @@ append_ga_env() {
   [[ -n "$GA_KEY_OVERRIDE" ]]      && DOCKER_ENV+=(-e "GA_API_KEY=$GA_KEY_OVERRIDE")
   [[ -n "$GA_ENDPOINT_OVERRIDE" ]] && DOCKER_ENV+=(-e "GA_API_BASE=$GA_ENDPOINT_OVERRIDE")
   [[ -n "$GA_FORMAT_OVERRIDE" ]]   && DOCKER_ENV+=(-e "GA_API_FORMAT=$GA_FORMAT_OVERRIDE")
+  [[ -n "${GA_OPTIONS_OVERRIDE:-}" ]] && DOCKER_ENV+=(-e "GA_API_OPTIONS=$GA_OPTIONS_OVERRIDE")
 }
 
 # ── Ctrl-C cleanup ──────────────────────────────────────────────────
@@ -129,10 +130,11 @@ if [[ -z "$GA_MODEL_OVERRIDE" && -f "$GA_MODELS_FILE" ]]; then
   _ga_config=$(node -e "
     const c = JSON.parse(require('fs').readFileSync('$GA_MODELS_FILE','utf8'));
     const m = c.active && c.models?.[c.active];
-    if (m) console.log([m.model, m.key||'', m.endpoint||'', m.format||''].join('\n'));
+    if (m) console.log([m.model, m.key||'', m.endpoint||'', m.format||'', m.options?JSON.stringify(m.options):''].join('\t'));
   " 2>/dev/null)
   if [[ -n "$_ga_config" ]]; then
-    IFS=$'\n' read -rd '' GA_MODEL_OVERRIDE GA_KEY_OVERRIDE GA_ENDPOINT_OVERRIDE GA_FORMAT_OVERRIDE <<< "$_ga_config" || true
+    IFS=$'\t' read -r GA_MODEL_OVERRIDE GA_KEY_OVERRIDE GA_ENDPOINT_OVERRIDE GA_FORMAT_OVERRIDE GA_OPTIONS_OVERRIDE <<< "$_ga_config" || true
+    export GA_OPTIONS_OVERRIDE
   fi
 fi
 

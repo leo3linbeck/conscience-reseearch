@@ -128,7 +128,7 @@ function sanitize(value) {
 // Named JSON fields, so questions can point at `action`, `principal_request`
 // and `referenced_files`. Observed facts only — nothing inferred.
 
-function buildState({ toolName, toolInput, principalRequest, fileMeta, resolvedFiles, reflexFlags, history }) {
+function buildState({ toolName, toolInput, principalRequest, fileMeta, writeTargets, resolvedFiles, reflexFlags, history }) {
   const state = {
     action: { tool: toolName, input: sanitize(toolInput || {}) },
   };
@@ -161,6 +161,19 @@ function buildState({ toolName, toolInput, principalRequest, fileMeta, resolvedF
       has_staged_changes: fileMeta.has_staged_changes,
       looks_sensitive:    fileMeta.is_sensitive,
     };
+  }
+
+  // Files a Bash command would overwrite or destroy, with version-control facts, so the
+  // reversibility test in the framework prompt applies to Bash too.
+  if (Array.isArray(writeTargets) && writeTargets.length > 0) {
+    state.files_modified_or_destroyed = writeTargets.map(m => ({
+      path:               m.path,
+      exists:             m.file_exists,
+      in_git_repo:        m.in_git_repo,
+      git_tracked:        m.git_tracked,
+      has_staged_changes: m.has_staged_changes,
+      looks_sensitive:    m.is_sensitive,
+    }));
   }
 
   if (Array.isArray(resolvedFiles) && resolvedFiles.length > 0) {

@@ -347,6 +347,10 @@ function cleanupStore() {
 // Load model config from .ga-models.json, with fallback to legacy .ga-api-key.
 // Environment variables override config for Docker test containers.
 function loadModelConfig() {
+  // Provider quirks (see ga-wrapper.js resolveBackend for the full list):
+  //   token_param, send_temperature, max_tokens, endpoint_path, extra_body.
+  const envOptions = () => { try { return process.env.GA_API_OPTIONS ? JSON.parse(process.env.GA_API_OPTIONS) : {}; } catch { return {}; } };
+
   // 1. Environment overrides (Docker test containers)
   if (process.env.ANTHROPIC_API_KEY || process.env.GA_API_KEY) {
     return {
@@ -354,6 +358,7 @@ function loadModelConfig() {
       model:    process.env.GA_MODEL || SYSTEM2_MODEL,
       endpoint: process.env.GA_API_BASE || 'https://api.anthropic.com',
       format:   process.env.GA_API_FORMAT || 'anthropic',
+      options:  envOptions(),
     };
   }
 
@@ -367,6 +372,7 @@ function loadModelConfig() {
         model:    active.model || SYSTEM2_MODEL,
         endpoint: active.endpoint || 'https://api.anthropic.com',
         format:   active.format || 'anthropic',
+        options:  active.options || {},
       };
     }
   } catch { /* fall through */ }
@@ -393,7 +399,7 @@ async function invokeSystem2(call, intuition) {
     return undecided('System 2 unavailable: no model configured (run install.js --add-model)');
   }
 
-  const { key, model, endpoint, format } = modelConfig;
+  const { key, model, endpoint, format, options = {} } = modelConfig;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SYSTEM2_API_TIMEOUT);
   const userMessage = context.buildSystem2UserMessage({ ...call, intuition });
@@ -418,8 +424,10 @@ async function invokeSystem2(call, intuition) {
       //   thinking off  — the prompt already structures the reasoning. Models that
       //                   think by default otherwise spend the whole token budget
       //                   before writing a verdict.
-      const body = { model, max_tokens: SYSTEM2_MAX_TOKENS, temperature: 0, thinking: { type: 'disabled' },
-                     system: systemPrompt, messages: [{ role: 'user', content: userMessage }] };
+      const body = { model, max_tokens: options.max_tokens || SYSTEM2_MAX_TOKENS,
+                     system: systemPrompt, messages: [{ role: 'user', content: userMessage }], ...(options.extra_body || {}) };
+      if (options.send_temperature !== false) body.temperature = 0;
+      body.thinking = { type: 'disabled' };
       response = await post(body);
       for (let retry = 0; retry < 2 && response.status === 400; retry++) {
         const detail = await response.clone().text();
@@ -428,30 +436,59 @@ async function invokeSystem2(call, intuition) {
         delete body[param];
         response = await post(body);
       }
+      if (!response.ok) return undecided(`System 2 API error: ${response.status}`);
+      return parseSystem2Response(await response.json());
     } else {
-      // OpenAI-compatible (openai, ollama, together, vLLM, etc.)
+      // OpenAI-compatible: any provider speaking the chat/completions shape
+      // (OpenAI, Gemini openai-compat, Together, vLLM, Ollama, …). Provider quirks
+      // come from options; a rejected parameter is dropped and retried.
       const baseUrl = endpoint.replace(/\/+$/, '');
       const isOllama = format === 'ollama' || baseUrl.includes('11434') || baseUrl.includes('ollama');
-      const url = isOllama ? `${baseUrl}/api/chat` : `${baseUrl}/v1/chat/completions`;
+      const path = options.endpoint_path
+        || (/\/(chat\/completions|api\/chat)$/.test(baseUrl) ? '' : (isOllama ? '/api/chat' : '/v1/chat/completions'));
+      const url = `${baseUrl}${path}`;
+      const tokenParam = options.token_param || (isOllama ? null : 'max_tokens');
+      const budget = options.max_tokens || SYSTEM2_MAX_TOKENS;
 
       const headers = { 'Content-Type': 'application/json' };
       if (key) headers['Authorization'] = `Bearer ${key}`;
+      const post = (b) => fetch(url, { method: 'POST', headers, body: JSON.stringify(b), signal: controller.signal });
+      const contentOf = (r) => r.message?.content ?? r.choices?.[0]?.message?.content ?? null;
 
       const body = {
         model,
-        temperature: 0,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage },
         ],
+        ...(options.extra_body || {}),
       };
-      if (isOllama) body.stream = false; else body.max_tokens = SYSTEM2_MAX_TOKENS;
+      if (options.send_temperature !== false) body.temperature = 0;
+      if (isOllama) body.stream = false;
+      if (tokenParam) body[tokenParam] = budget;
 
-      response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
+      response = await post(body);
+      for (let retry = 0; retry < 3 && response.status === 400; retry++) {
+        const detail = await response.clone().text();
+        const param = ['temperature', 'max_tokens', 'max_completion_tokens', tokenParam]
+          .filter(Boolean).find(p => p in body && new RegExp(p, 'i').test(detail));
+        if (param === 'max_tokens' && /max_completion_tokens/i.test(detail)) {
+          delete body.max_tokens; body.max_completion_tokens = budget;
+        } else if (param) { delete body[param]; }
+        else break;
+        response = await post(body);
+      }
+      if (!response.ok) return undecided(`System 2 API error: ${response.status}`);
+
+      let result = await response.json();
+      let content = contentOf(result);
+      if ((!content || content.trim() === '') && result.choices?.[0]?.finish_reason === 'length' && tokenParam) {
+        body[tokenParam] = budget * 2;
+        const retry = await post(body);
+        if (retry.ok) { result = await retry.json(); content = contentOf(result); }
+      }
+      return parseSystem2Response(result);
     }
-
-    if (!response.ok) return undecided(`System 2 API error: ${response.status}`);
-    return parseSystem2Response(await response.json());
   } catch (err) {
     return undecided(`System 2 error: ${err.name === 'AbortError' ? 'timed out' : err.message}`);
   } finally {

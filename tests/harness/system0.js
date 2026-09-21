@@ -298,11 +298,12 @@ function checkReadSize(cmd) {
 
 // ── File metadata (git status + sensitivity) ─────────────────────────
 
-function resolveFileMetadata(toolName, toolInput) {
-  const filePath = toolInput && toolInput.file_path;
-  if (!filePath) return null;
-  if (toolName !== 'Write' && toolName !== 'Edit') return null;
-
+// Compute the reversibility-relevant facts for one file path: does it exist, is it
+// under version control (in a repo, tracked, and whether the tracked copy already has
+// staged changes that an overwrite would lose), and does it look sensitive. This is the
+// signal the morality prompt's reversibility test relies on. Shared by Write/Edit
+// (resolveFileMetadata) and Bash write targets (resolveBashWriteTargets).
+function fileFacts(filePath, cwd) {
   const meta = {
     path: filePath,
     file_exists: fs.existsSync(filePath),
@@ -322,7 +323,9 @@ function resolveFileMetadata(toolName, toolInput) {
     }
   }
 
-  const dir = path.dirname(filePath);
+  // Resolve relative paths against the command's cwd so git lookups are correct.
+  const abs = path.isAbsolute(filePath) ? filePath : path.resolve(cwd || process.cwd(), filePath);
+  const dir = fs.existsSync(abs) ? (fs.statSync(abs).isDirectory() ? abs : path.dirname(abs)) : path.dirname(abs);
   try {
     const repoRoot = execSync('git rev-parse --show-toplevel', {
       cwd: dir, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
@@ -330,14 +333,14 @@ function resolveFileMetadata(toolName, toolInput) {
     meta.in_git_repo = true;
 
     try {
-      execSync(`git ls-files --error-unmatch ${JSON.stringify(filePath)}`, {
+      execSync(`git ls-files --error-unmatch ${JSON.stringify(abs)}`, {
         cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
       });
       meta.git_tracked = true;
     } catch { meta.git_tracked = false; }
 
     try {
-      const staged = execSync(`git diff --cached --name-only -- ${JSON.stringify(filePath)}`, {
+      const staged = execSync(`git diff --cached --name-only -- ${JSON.stringify(abs)}`, {
         cwd: repoRoot, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
       }).trim();
       meta.has_staged_changes = staged.length > 0;
@@ -345,6 +348,53 @@ function resolveFileMetadata(toolName, toolInput) {
   } catch { meta.in_git_repo = false; }
 
   return meta;
+}
+
+function resolveFileMetadata(toolName, toolInput, cwd) {
+  const filePath = toolInput && toolInput.file_path;
+  if (!filePath) return null;
+  if (toolName !== 'Write' && toolName !== 'Edit') return null;
+  return fileFacts(filePath, cwd);
+}
+
+// Common Bash forms that overwrite or destroy a file, so the reversibility test can be
+// applied to Bash too (not just Write/Edit). Returns file facts for each distinct target.
+// Deliberately covers the realistic destructive forms; exotic/obfuscated ones tend to
+// trip System 0's other checks. Redirections to /dev/null and fd dups are ignored.
+function resolveBashWriteTargets(toolName, toolInput, cwd) {
+  if (toolName !== 'Bash') return [];
+  const cmd = toolInput && toolInput.command;
+  if (!cmd || typeof cmd !== 'string') return [];
+
+  const targets = new Set();
+  const clean = (p) => p && p.replace(/^["']|["']$/g, '');
+  const notDevNull = (p) => p && !/^\/dev\/(null|stdout|stderr)$/.test(p) && !/^&\d+$/.test(p);
+
+  // Output redirection: > file, >> file  (skip 2>&1, >/dev/null, handled by the regex)
+  for (const m of cmd.matchAll(/(?:^|[\s;|&])\d*>>?\s*("[^"]+"|'[^']+'|[^\s;|&()]+)/g)) {
+    const t = clean(m[1]); if (notDevNull(t)) targets.add(t);
+  }
+  // mv / cp: last non-flag token is the destination
+  for (const m of cmd.matchAll(/(?:^|[\s;|&(])(?:mv|cp)\s+((?:-[^\s]+\s+)*[^\s;|&]+(?:\s+[^\s;|&]+)*)/g)) {
+    const args = m[1].split(/\s+/).filter(a => a && !a.startsWith('-'));
+    const dest = clean(args[args.length - 1]); if (notDevNull(dest)) targets.add(dest);
+  }
+  // In-place / truncating tools
+  for (const m of cmd.matchAll(/(?:^|[\s;|&(])sed\s+(?:-[^\s]*\s+)*-i[^\s]*(?:\s+-[^\s]+)*\s+(?:(?:'[^']*'|"[^"]*"|[^\s;|&]+)\s+)*("[^"]+"|'[^']+'|[^\s;|&]+)\s*$/gm)) {
+    const t = clean(m[1]); if (notDevNull(t)) targets.add(t);
+  }
+  for (const m of cmd.matchAll(/(?:^|[\s;|&(])(?:tee(?:\s+-a)?|truncate\s+(?:-s\s*\S+\s+))\s+("[^"]+"|'[^']+'|[^\s;|&]+)/g)) {
+    const t = clean(m[1]); if (notDevNull(t)) targets.add(t);
+  }
+  for (const m of cmd.matchAll(/(?:^|[\s;|&(])dd\s+[^\n;|&]*\bof=("[^"]+"|'[^']+'|[^\s;|&]+)/g)) {
+    const t = clean(m[1]); if (notDevNull(t)) targets.add(t);
+  }
+  // rm targets (destruction, not overwrite)
+  for (const m of cmd.matchAll(/(?:^|[\s;|&(])rm\s+((?:-[^\s]+\s+)*[^\s;|&]+(?:\s+[^\s;|&]+)*)/g)) {
+    for (const a of m[1].split(/\s+/)) { const t = clean(a); if (t && !t.startsWith('-') && notDevNull(t)) targets.add(t); }
+  }
+
+  return [...targets].slice(0, 6).map(t => fileFacts(t, cwd));
 }
 
 // ── The reflex ───────────────────────────────────────────────────────
@@ -414,6 +464,8 @@ module.exports = {
   parseBash,
   checkReadSize,
   resolveFileMetadata,
+  resolveBashWriteTargets,
+  fileFacts,
   EXEMPT_TOOLS,
   ALWAYS_ESCALATE_TOOLS,
   SENSITIVE_FILE_PATTERNS,

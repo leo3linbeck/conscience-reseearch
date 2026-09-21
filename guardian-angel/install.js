@@ -281,16 +281,23 @@ if (ADD_MODEL) {
   const argKey      = getArg('--key');
   const argEndpoint = getArg('--endpoint');
   const argFormat   = getArg('--format');
+  const argOptions  = getArg('--options');   // JSON: provider quirks (token_param, send_temperature, max_tokens, endpoint_path, extra_body)
 
   if (argName && argModel) {
     // Non-interactive
     const endpoint = argEndpoint || 'https://api.anthropic.com';
     const format   = argFormat || detectFormat(endpoint);
     const config   = loadModelsConfig();
-    config.models[argName] = { model: argModel, endpoint, format, key: argKey || null };
+    const profile  = { model: argModel, endpoint, format, key: argKey || null };
+    if (argOptions) {
+      try { profile.options = JSON.parse(argOptions); }
+      catch (e) { console.error(`--options must be valid JSON: ${e.message}`); process.exit(1); }
+    }
+    config.models[argName] = profile;
     if (!config.active) config.active = argName;
     saveModelsConfig(config);
     console.log(`Added model "${argName}" (${argModel})`);
+    if (profile.options) console.log(`  options: ${JSON.stringify(profile.options)}`);
     if (config.active === argName) console.log(`  → set as active`);
     process.exit(0);
   }

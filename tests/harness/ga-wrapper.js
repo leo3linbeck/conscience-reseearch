@@ -32,7 +32,8 @@ const { checkSystem0, resolveFileMetadata } = system0;
 
 const DEFAULT_MODEL   = 'claude-haiku-4-5-20251001';
 const API_TIMEOUT     = 20_000;   // Sonnet-class models need 9-12s for a full verdict
-const MAX_TOKENS      = 2048;
+const MAX_TOKENS      = 4096;   // headroom: some models (Gemini) spend 300-600 tokens on
+                                 // hidden reasoning before the JSON, truncating at 2048.
 const WRAPPERS_DIR    = path.join(__dirname, '..', 'wrappers');
 
 // ── LLM Backend Configuration ────────────────────────────────────────
@@ -62,15 +63,43 @@ const _modelsConfig = (!process.env.GA_API_BASE && !process.env.GA_MODEL) ? load
 
 const GA_API_BASE = process.env.GA_API_BASE || _modelsConfig?.endpoint || 'https://api.anthropic.com';
 
-function detectApiFormat() {
-  const explicit = process.env.GA_API_FORMAT;
-  if (explicit) return explicit;
-  if (_modelsConfig?.format) return _modelsConfig.format;
-  if (GA_API_BASE.includes('anthropic.com')) return 'anthropic';
-  return 'openai';
+// ── Pluggable System 2 backend ───────────────────────────────────────
+// Any LLM can be System 2. A backend is defined by four things, resolved (in order)
+// from environment variables, the active .ga-models.json profile, then defaults:
+//   base      GA_API_BASE      — the API root
+//   format    GA_API_FORMAT    — 'anthropic' | 'openai' (openai covers OpenAI, Gemini's
+//                                 openai-compat endpoint, Together, vLLM, Ollama, etc.)
+//   key       GA_API_KEY
+//   options   (profile.options) — provider quirks, all optional:
+//     token_param       'max_tokens' (default) | 'max_completion_tokens' — name of the
+//                        output-budget field (GPT-5-class models use the latter).
+//     send_temperature  true (default) | false — some models reject temperature entirely.
+//     max_tokens        override the default budget for this model.
+//     endpoint_path     override the chat path (default '/v1/chat/completions', or
+//                        '/api/chat' for Ollama). For a base that already ends in the path.
+//     extra_body        object merged into the request body verbatim (e.g. a provider's
+//                        reasoning-effort control).
+// Nothing about a new provider requires code changes: add a profile with the right
+// options. The param-fallback loop below also drops any single parameter a model rejects
+// at runtime, so an unknown quirk degrades to a working call rather than a hard failure.
+
+function resolveBackend() {
+  const base = GA_API_BASE.replace(/\/+$/, '');
+  const format = process.env.GA_API_FORMAT
+    || _modelsConfig?.format
+    || (base.includes('anthropic.com') ? 'anthropic' : 'openai');
+  let options = { ..._modelsConfig?.options };
+  if (process.env.GA_API_OPTIONS) {
+    try { options = { ...options, ...JSON.parse(process.env.GA_API_OPTIONS) }; }
+    catch { /* malformed options env → ignore, use profile/defaults */ }
+  }
+  if (process.env.GA_TOKEN_PARAM)  options.token_param = process.env.GA_TOKEN_PARAM;
+  if (process.env.GA_MAX_TOKENS)   options.max_tokens = Number(process.env.GA_MAX_TOKENS);
+  return { base, format, options };
 }
 
-const GA_API_FORMAT = detectApiFormat();
+const GA_BACKEND = resolveBackend();
+const GA_API_FORMAT = GA_BACKEND.format;
 
 // ── Wrapper loading ──────────────────────────────────────────────────
 
@@ -127,7 +156,8 @@ async function callAnthropic(systemPrompt, userMessage, model, apiKey) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), API_TIMEOUT);
     try {
-      const post = (body) => fetch(`${GA_API_BASE}/v1/messages`, {
+      const opts = GA_BACKEND.options || {};
+      const post = (body) => fetch(`${GA_BACKEND.base}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -144,9 +174,9 @@ async function callAnthropic(systemPrompt, userMessage, model, apiKey) {
       //   thinking off  — the prompt already structures the reasoning (Phase 1,
       //                   Phase 2, JSON). Models that think by default otherwise
       //                   spend the whole token budget before writing a verdict.
-      const body = { model, max_tokens: MAX_TOKENS, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] };
+      const body = { model, max_tokens: opts.max_tokens || MAX_TOKENS, system: systemPrompt, messages: [{ role: 'user', content: userMessage }], ...(opts.extra_body || {}) };
       const dropped = _rejectedParams.get(model) || new Set();
-      if (!dropped.has('temperature')) body.temperature = 0;
+      if (opts.send_temperature !== false && !dropped.has('temperature')) body.temperature = 0;
       if (!dropped.has('thinking'))    body.thinking = { type: 'disabled' };
 
       let response = await post(body);
@@ -172,13 +202,17 @@ async function callAnthropic(systemPrompt, userMessage, model, apiKey) {
 }
 
 async function callOpenAI(systemPrompt, userMessage, model, apiKey) {
-  // OpenAI-compatible: works with OpenAI, Ollama, Together, vLLM, etc.
-  const baseUrl = GA_API_BASE.replace(/\/+$/, '');
-  // Ollama uses /api/chat, others use /v1/chat/completions
+  // OpenAI-compatible: OpenAI, Gemini (openai-compat), Together, vLLM, Ollama, etc.
+  const baseUrl = GA_BACKEND.base;
+  const opts = GA_BACKEND.options || {};
   const isOllama = baseUrl.includes('11434') || baseUrl.includes('ollama');
-  const endpoint = isOllama
-    ? `${baseUrl}/api/chat`
-    : `${baseUrl}/v1/chat/completions`;
+  // A base that already ends in the chat path is used as-is; otherwise append the standard
+  // path (Ollama uses /api/chat). endpoint_path overrides everything.
+  const path = opts.endpoint_path
+    || (/\/(chat\/completions|api\/chat)$/.test(baseUrl) ? '' : (isOllama ? '/api/chat' : '/v1/chat/completions'));
+  const endpoint = `${baseUrl}${path}`;
+  const tokenParam = opts.token_param || (isOllama ? null : 'max_tokens');
+  const budget = opts.max_tokens || MAX_TOKENS;
 
   return withRateLimit(async () => {
     const controller = new AbortController();
@@ -187,32 +221,53 @@ async function callOpenAI(systemPrompt, userMessage, model, apiKey) {
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
+      const post = (body) => fetch(endpoint, {
+        method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal,
+      });
+      const contentOf = (r) => r.message?.content ?? r.choices?.[0]?.message?.content ?? null;
+
       const body = {
         model,
-        temperature: 0,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage },
         ],
+        ...(opts.extra_body || {}),
       };
-      // Ollama doesn't use max_tokens; OpenAI-compatible uses max_tokens
-      if (!isOllama) body.max_tokens = MAX_TOKENS;
+      const dropped = _rejectedParams.get(model) || new Set();
+      if (opts.send_temperature !== false && !dropped.has('temperature')) body.temperature = 0;
+      if (tokenParam && !dropped.has(tokenParam)) body[tokenParam] = budget;
 
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
+      let response = await post(body);
+      // Drop any single parameter the model names in a 400, then retry (same as Anthropic).
+      for (let retry = 0; retry < 3 && response.status === 400; retry++) {
+        const detail = await response.text();
+        const param = ['temperature', 'max_tokens', 'max_completion_tokens', tokenParam]
+          .filter(Boolean).find(p => p in body && new RegExp(p, 'i').test(detail));
+        // If the error names max_tokens but the model wants max_completion_tokens, switch.
+        if (param === 'max_tokens' && /max_completion_tokens/i.test(detail)) {
+          delete body.max_tokens; body.max_completion_tokens = budget;
+        } else if (param) {
+          dropped.add(param); _rejectedParams.set(model, dropped); delete body[param];
+        } else {
+          throw new Error(`API error: 400 ${detail.slice(0, 200)}`);
+        }
+        response = await post(body);
+      }
       if (!response.ok) throw new Error(`API error: ${response.status}`);
-      const result = await response.json();
 
-      // Ollama format: { message: { content: "..." } }
-      // OpenAI format: { choices: [{ message: { content: "..." } }] }
-      if (result.message?.content) return result.message.content;
-      if (result.choices?.[0]?.message?.content) return result.choices[0].message.content;
-      throw new Error('Unexpected response format');
+      let result = await response.json();
+      let content = contentOf(result);
+      // A model that spent its whole budget on hidden reasoning returns empty content and
+      // finish_reason 'length'. Retry once with a doubled budget before giving up.
+      const truncated = (!content || content.trim() === '') && result.choices?.[0]?.finish_reason === 'length';
+      if (truncated && tokenParam) {
+        body[tokenParam] = budget * 2;
+        response = await post(body);
+        if (response.ok) { result = await response.json(); content = contentOf(result); }
+      }
+      if (content && content.trim() !== '') return content;
+      throw new Error(`no content in response (finish_reason: ${result.choices?.[0]?.finish_reason})`);
     } finally {
       clearTimeout(timeout);
     }
@@ -269,8 +324,11 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   }
   reflexFlags.push(...download.flags);
 
-  const fileMeta = resolveFileMetadata(toolName, toolInput);
-  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, resolvedFiles, reflexFlags, history: opts.history || [],
+  const fileMeta = resolveFileMetadata(toolName, toolInput, toolCwd);
+  // Files a Bash command would overwrite/destroy, with version-control facts, so the
+  // reversibility test applies to Bash and not only to Write/Edit.
+  const writeTargets = system0.resolveBashWriteTargets(toolName, toolInput, toolCwd);
+  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, writeTargets, resolvedFiles, reflexFlags, history: opts.history || [],
                  frameworkPrompt: wrapperText };   // unified System 1 spec: same prompt as System 2
 
   // ── System 2 (defined here so shadow mode can run it alongside System 1) ──

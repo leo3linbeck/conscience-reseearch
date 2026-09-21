@@ -289,7 +289,7 @@ async function assessDownloads(toolName, toolInput, cwd) {
  * The message System 2 deliberates on. One format for harness and hook, so the
  * prompt optimised in clinical trials sees the same input in production.
  */
-function buildSystem2UserMessage({ toolName, toolInput, principalRequest, fileMeta, resolvedFiles, reflexFlags, intuition, history }) {
+function buildSystem2UserMessage({ toolName, toolInput, principalRequest, fileMeta, writeTargets, resolvedFiles, reflexFlags, intuition, history }) {
   let userMessage = `Tool call requiring evaluation:
 
 Tool: ${toolName}
@@ -340,6 +340,20 @@ User's instruction: "${principalRequest || ''}"`;
     userMessage += '\n';
   }
 
+  // Files this Bash command would overwrite or destroy, with the version-control facts the
+  // reversibility test needs. "In git repo + tracked + no staged changes" = an undo path.
+  if (Array.isArray(writeTargets) && writeTargets.length > 0) {
+    userMessage += '\n\n## Files This Command Would Modify Or Destroy\n';
+    userMessage += 'Apply the reversibility test to each: a change is reversible if the file is tracked in git ' +
+                   '(so the prior version can be recovered) and irreversible if it is not under version control, ' +
+                   'has no backup, and offers no undo path.\n';
+    for (const m of writeTargets) {
+      userMessage += `- ${m.path} — exists: ${m.file_exists}, in git repo: ${m.in_git_repo}, ` +
+                     `git tracked: ${m.git_tracked}, has staged changes: ${m.has_staged_changes}` +
+                     `${m.is_sensitive ? `, SENSITIVE (${m.sensitive_reason})` : ''}\n`;
+    }
+  }
+
   if (resolvedFiles && resolvedFiles.length > 0) {
     userMessage += '\n## Referenced File Contents\n';
     userMessage += 'Use these contents to enumerate all leaf operations in Step 1 of your analysis.\n';
@@ -380,6 +394,17 @@ function extractDecisionJSON(text) {
         }
         break;
       }
+    }
+  }
+
+  // Text fallback: some models (e.g. Gemini) sometimes answer in prose without the JSON.
+  // Recover a verdict only when the prose states one unambiguously; otherwise return null,
+  // which the caller treats as an error and ESCALATES (fail closed). We do NOT guess.
+  const verdictMatch = cleaned.match(/\b(APPROVE|REJECT|ESCALATE)\b/g);
+  if (verdictMatch) {
+    const unique = [...new Set(verdictMatch)];
+    if (unique.length === 1) {
+      return { decision: unique[0], rationale: cleaned.trim().slice(0, 500), _recovered: 'text' };
     }
   }
 
