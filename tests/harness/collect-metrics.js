@@ -249,6 +249,35 @@ const lines = [];
 // Extract model info from results
 const agentModel = results.find(r => r.agent_model)?.agent_model || 'unknown';
 const gaModel    = results.find(r => r.ga_model)?.ga_model || 'n/a';
+const gaResults  = results.filter(r => r.condition === 'C' || r.condition === 'D');
+const s1Mode     = gaResults.find(r => r.ga_s1_mode)?.ga_s1_mode || 'unrecorded';
+const s1Spec     = gaResults.find(r => r.ga_s1_spec)?.ga_s1_spec || 'unrecorded (pre-2026-09-22 harness)';
+
+// ── Configuration consistency ────────────────────────────────────────
+// Every result carries the configuration it ran under. A run whose GA results
+// disagree on any of these was produced under more than one configuration
+// (e.g. resumed with a different System 1 spec) and its figures are not
+// comparable to anything — say so at the top of the report, not in a footnote.
+const CONFIG_KEYS = ['agent_model', 'ga_model', 'ga_wrapper', 'ga_s1_mode', 'ga_s1_spec'];
+const configWarnings = [];
+for (const cond of ['A', 'B', 'C', 'D']) {
+  const rs = results.filter(r => r.condition === cond && !r.error);   // error results carry no config
+  if (rs.length === 0) continue;
+  const keys = cond === 'A' || cond === 'B' ? ['agent_model'] : CONFIG_KEYS;
+  for (const k of keys) {
+    const seen = new Map();
+    for (const r of rs) {
+      let v = r[k] === undefined || r[k] === null ? '(unrecorded)' : String(r[k]);
+      if (k === 'ga_s1_mode' && v === '(unrecorded)') v = 'enforce';   // unset GA_S1_MODE means enforce (system1.js default)
+      seen.set(v, (seen.get(v) || 0) + 1);
+    }
+    if (seen.size > 1) {
+      const detail = [...seen.entries()].map(([v, n]) => `${v} ×${n}`).join(', ');
+      configWarnings.push(`condition ${cond}: ${k} is mixed — ${detail}`);
+    }
+  }
+}
+for (const w of configWarnings) process.stderr.write(`WARNING: mixed configuration — ${w}\n`);
 
 lines.push('# Guardian Angel Clinical Trial v3 — Results Report');
 lines.push('');
@@ -259,7 +288,15 @@ lines.push(`| **Generated** | ${new Date().toISOString()} |`);
 lines.push(`| **Total results** | ${results.length} |`);
 lines.push(`| **Agent model** | ${agentModel} |`);
 lines.push(`| **GA model** | ${gaModel} |`);
+lines.push(`| **System 1** | jev (${s1Mode}), spec ${s1Spec} |`);
 lines.push('');
+if (configWarnings.length > 0) {
+  lines.push('> ⚠️ **MIXED CONFIGURATION — figures below are not comparable.** Results in this run were produced under more than one configuration:');
+  for (const w of configWarnings) lines.push(`> - ${w}`);
+  lines.push('>');
+  lines.push('> Set the inconsistent results aside (e.g. move them out of `raw/`) and re-run them under the intended configuration with `./run-trial.sh --resume <run>` before quoting any number from this report.');
+  lines.push('');
+}
 
 // Ground truth summary
 const harmfulCount = Object.values(groundTruth).filter(g => g.harmful).length;
@@ -783,6 +820,9 @@ const summary = {
   timestamp:   new Date().toISOString(),
   agent_model: agentModel,
   ga_model:    gaModel,
+  ga_s1_mode:  s1Mode,
+  ga_s1_spec:  s1Spec,
+  config_warnings: configWarnings,     // non-empty ⇒ mixed configuration; do not compare
   total_results: results.length,
   ground_truth: groundTruth,
   condition_A: metricsA ? { counts: metricsA.counts, metrics: metricsA.metrics, by_category: metricsA.byCategory } : null,

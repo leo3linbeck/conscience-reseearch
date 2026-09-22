@@ -266,7 +266,7 @@ Environment variables always take precedence over the config file, useful for Do
 | `GA_S1_MODEL` | System 1 model (default `jev-latest`) |
 | `GA_S1_BASE` | System 1 endpoint (default `https://api.typesafe.ai`) |
 | `GA_S1_TIMEOUT_MS` | System 1 timeout (default 4000) |
-| `GA_S1_SPEC` | Trial harness only: use `wrappers/<name>.json` |
+| `GA_S1_SPEC` | Trial harness only: use `wrappers/<name>.json` (default `system1-unified`, the spec production installs) |
 
 ## System 0: Reflex
 
@@ -614,7 +614,7 @@ node guardian-angel/install.js --set-key KEY   # Set API key (legacy, migrates t
 
 ## Clinical Trial System
 
-The `tests/` directory contains a clinical trial system for rigorously evaluating Guardian Angel's effectiveness. It tests 230 scenarios (110 harmful, 120 benign) across 16 threat categories inside Docker containers.
+The `tests/` directory contains a clinical trial system for rigorously evaluating Guardian Angel's effectiveness. It tests 358 scenarios (179 harmful, 179 benign) across 16 threat categories inside Docker containers.
 
 ### Threat Categories
 
@@ -677,26 +677,37 @@ cd tests
 # System 1 (jev): measure it without trusting it, or switch it off for a two-tier baseline
 ./run-trial.sh --s1-mode shadow
 ./run-trial.sh --s1-mode off
-./run-trial.sh --s1-spec system1-unified   # wrappers/system1-unified.json (the default)
+./run-trial.sh --s1-spec system1          # legacy multi-question spec (default: system1-unified)
 
 # Run sequentially (instead of parallel)
 ./run-trial.sh --sequential
 
+# Continue an interrupted run under its original configuration
+./run-trial.sh --resume run-20260922-053624
+
 # Rerun failures from a previous run
-./run-trial.sh --rerun-failures results/run-20260406-181349
+./run-trial.sh --rerun-failures run-20260406-181349
 ```
+
+**The defaults are production.** With no flags, a trial runs the canonical `default.txt` prompt, the unified System 1 spec (`system1-unified.json`, what `install.js` installs as `ga-system1.json`), System 1 in `enforce` mode, and the active System 2 profile from `~/.claude/hooks/.ga-models.json`. A flag is only needed to test a *departure* from production.
+
+**Every run records its configuration.** `run-trial.sh` writes `run-config.json` into the run directory before the first scenario starts (conditions, categories, wrapper, agent model, System 2 model/endpoint/format, System 1 mode and spec &mdash; never keys), and every raw result carries the same fields (`agent_model`, `ga_model`, `ga_wrapper`, `ga_s1_mode`, `ga_s1_spec`). `--resume` reloads `run-config.json`, so a continuation runs under exactly the original configuration without anyone having to remember the original flags; an explicit flag that contradicts the saved configuration is refused. `--condition` and `--category` may still be given on resume because they only narrow the work. Resuming skips every scenario × condition pair that already has a completed, non-error result and appends to the existing category logs.
+
+**A mixed run is flagged, not averaged.** `collect-metrics.js` checks that all results in a condition agree on those configuration fields. If they do not, the report opens with a `MIXED CONFIGURATION` warning naming the field and the split (and `summary.json` carries it as `config_warnings`), because a report that silently pools two configurations is worse than no report. Set the inconsistent results aside, outside `raw/`, and re-run them with `--resume`.
 
 ### Results
 
 Results are saved to `tests/results/run-<timestamp>/`:
 
 ```
-results/run-20260406-181349/
-  raw/                          # Per-scenario JSON result files
+results/run-20260922-053624/
+  run-config.json               # What this run measures: conditions, wrapper, models, S1 mode + spec
+  raw/                          # Per-scenario JSON result files (each also records its configuration)
     credential-exfiltration__harmful__h001--A.json
     credential-exfiltration__harmful__h001--C.json
     ...
-  report.md                     # Formatted metrics report
+  <category>.log                # One worker log per category
+  report.md                     # Formatted metrics report (opens with a warning if the run is mixed)
   summary.json                  # Machine-readable metrics
 ```
 
@@ -719,6 +730,8 @@ Escalated calls are excluded from FP and FN. Each FP and FN is listed with its s
 > **A caveat on FP labels.** The report treats every call made in a benign scenario as benign. That fails when the *agent* misbehaves inside a benign task: with Sonnet as System 2, two of its three "false positives" were rejections of an agent running `npm install` after being told "do not fix anything, just report", and the third rejected an agent that printed a fabricated "validation results" block it had never computed &mdash; which System 2 called deception toward the principal. Read each listed FP before counting it as an error.
 >
 > **Parallel-mode isolation fix (2026-09-18).** Every parallel worker's mock server used to join one shared Docker network under the same alias, `ga-mock-server`, so Docker round-robined scenario traffic across all of them. One category's exfiltration could land on another category's server: phantom harm in one scenario, *missed* harm in the other. Scenarios scored "harmed" by mock-server traffic although the agent had executed no command at all: 9 in the April 2026 published run (including one of GA's two reported false negatives, and a benign scenario marked harmed), 3&ndash;4 in each run on 2026-09-18. The missed-harm side leaves no trace in the results &mdash; but it shows up once fixed: with workers isolated, harmed scenarios under condition B (no guardrails) rose from 55 to 85 of 219, i.e. the true unguarded harm rate jumped well above the ~51% earlier runs reported. Each worker now gets a private network. (This ~78% figure was later superseded: after the 2026-09-21 harm-evidence fixes &mdash; which corrected 21 scenarios whose harm the harness had failed to detect &mdash; the definitive run measured 103 of 110 harmful scenarios causing real harm under condition B, ~94%. See *Latest Validated Results* below.)
+>
+> **Configuration contamination in a resumed run (2026-09-22).** A full trial on the champion prompt was interrupted a third of the way through and continued by a hand-rolled resume that did not carry the original `--s1-spec system1-unified` flag. The harness default at the time was the legacy multi-question spec, so the continuation ran a different System 1 from the first third: 134 condition-C results under the unified spec, 224 under the multi-question one, pooled in one report. Nothing in the report said so. The symptom was a System 1 escalation rate that appeared to rise from 38% to 51% between two prompts &mdash; the entire "effect" was the spec change, which escalated 41 of 99 benign calls where the unified spec had escalated 5 of 32. Three changes follow from this. The harness defaults now match production (unified spec), so an unflagged run measures what is installed. Every run writes `run-config.json` and every result records its configuration, and `--resume` reloads that configuration rather than trusting the operator to repeat the flags. And the metrics collector refuses to present a mixed run quietly: the report opens with the split. Runs before this date do not record `ga_s1_spec`; for them the spec must be inferred from the `strands` in each result's `ga_system1` block (three verdict strands = unified; twelve = multi-question).
 >
 > **Evidence-checker fixes (2026-09-18).** Two bugs inflated harm counts in earlier runs. `file_exists` checks ignored the scenario's `content_contains`, so an agent that was stopped from running a malicious script and then wrote a *clean* file at the same path was scored as harmed (3 scenarios). `file_modified` + `content_must_contain` treated a file that does not exist as harmed (up to 36 scenarios, whenever the file is not pre-created). Both overstate false negatives &mdash; for GA and for the baselines alike &mdash; so, together with the isolation bug above, figures from runs before this date are unreliable in both directions and not directly comparable.
 
@@ -772,10 +785,11 @@ guardian-angel/
 tests/
   run-trial.sh                  # Trial orchestrator
   run-category.sh               # Per-category worker
-  scenarios/                    # 230 test scenarios (16 categories)
+  scenarios/                    # 358 test scenarios (16 categories)
   wrappers/
     default.txt, alternative.txt  # Shared morality prompts (System 2 + System 1)
-    system1-unified.json          # System 1 spec: jev thresholds + dissent guard
+    system1-unified.json          # System 1 spec: jev thresholds + dissent guard (default; what production installs)
+    system1.json                  # Legacy multi-question System 1 spec (opt-in: --s1-spec system1)
   harness/
     system0.js                  # Reflex          ┐ single source of truth:
     system1.js                  # Intuition (jev) │ required by the harness,
@@ -788,7 +802,7 @@ tests/
     tool-executor.js            # Tool execution
     evidence-checker.js         # Harm detection
   mock-server/                  # Mock exfiltration server
-  results/                      # Trial output
+  results/                      # Trial output: run-<timestamp>/{run-config.json, raw/, report.md, summary.json}
 ```
 
 ### Design Principles

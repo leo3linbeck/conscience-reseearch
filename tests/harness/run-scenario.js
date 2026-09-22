@@ -21,7 +21,7 @@ const { spawnSync } = require('child_process');
 
 const { TrialAPIClient, redactSecrets } = require('./api-client');
 const { checkEvidence }     = require('./evidence-checker');
-const { loadWrapper }       = require('./ga-wrapper');
+const { loadWrapper, system1SpecName } = require('./ga-wrapper');
 
 // ── Config ────────────────────────────────────────────────────────────
 const CONDITION      = process.env.CONDITION;
@@ -130,7 +130,9 @@ runScenario()
       variant:        scenario.variant,
       agent_model:    client.model,
       ga_model:       process.env.GA_MODEL || null,
-      ga_s1_mode:     process.env.GA_S1_MODE || null,
+      ga_wrapper:     ['C', 'D'].includes(CONDITION) ? (CONDITION === 'D' ? 'alternative' : WRAPPER_NAME) : null,
+      ga_s1_mode:     process.env.GA_S1_MODE || 'enforce',
+      ga_s1_spec:     system1SpecName(),          // recorded so mixed-spec runs are detectable
       harm_occurred:  evidence.harm_occurred,
       harm_details:   evidence.details,
       harm_baseline:  apiResult.harmBaseline,   // true → evidence pre-existed; no per-call attribution

@@ -19,10 +19,16 @@
 #   ./run-trial.sh --ga-format openai               # anthropic, openai, or ollama
 #   ./run-trial.sh --s1-mode shadow                 # System 1 (jev): enforce | shadow | off
 #   ./run-trial.sh --s1-key ts-...                  # TypeSafe API key (or TYPESAFE_API_KEY, or .ga-models.json)
-#   ./run-trial.sh --s1-spec my-questions           # use wrappers/my-questions.json
+#   ./run-trial.sh --s1-spec system1                # System 1 spec: wrappers/<name>.json (default: system1-unified)
 #   ./run-trial.sh --optimize [--max-iter N]        # run optimization loop
 #   ./run-trial.sh --sequential                     # serial mode
 #   ./run-trial.sh --v2                             # run legacy v2 scenarios
+#   ./run-trial.sh --resume run-20260922-053624     # continue an interrupted run (skips completed scenario×condition pairs)
+#
+# Every run writes results/run-<timestamp>/run-config.json (conditions, wrapper, models,
+# System 1 mode + spec). --resume reloads it, so the continuation runs under exactly the
+# original configuration; a conflicting explicit flag is refused. The defaults, with no
+# flags, are what production installs: wrapper default.txt, System 1 spec system1-unified.
 #
 # Output:
 #   results/run-<timestamp>/raw/    — per-scenario JSON files
@@ -99,21 +105,24 @@ OPTIMIZE=false
 MAX_ITER=10
 RERUN_FAILURES=""
 AB_TEST=false
+RESUME_RUN=""
+EXPLICIT=()           # flags given on the command line (checked against a resumed run's saved config)
+RESUME_CONFIG=""
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --condition)     CONDITION_FILTER="$2"; shift 2 ;;
     --scenario)      SCENARIO_FILTER="$2";  shift 2 ;;
     --category)      CATEGORY_FILTER="$2";  shift 2 ;;
-    --model)         MODEL_OVERRIDE="$2";       shift 2 ;;
-    --ga-model)      GA_MODEL_OVERRIDE="$2";   shift 2 ;;
+    --model)         MODEL_OVERRIDE="$2";       EXPLICIT+=(model);       shift 2 ;;
+    --ga-model)      GA_MODEL_OVERRIDE="$2";   EXPLICIT+=(ga_model);    shift 2 ;;
     --ga-key)        GA_KEY_OVERRIDE="$2";     shift 2 ;;
-    --ga-endpoint)   GA_ENDPOINT_OVERRIDE="$2"; shift 2 ;;
-    --ga-format)     GA_FORMAT_OVERRIDE="$2";  shift 2 ;;
-    --s1-mode)       export GA_S1_MODE="$2";   shift 2 ;;
+    --ga-endpoint)   GA_ENDPOINT_OVERRIDE="$2"; EXPLICIT+=(ga_endpoint); shift 2 ;;
+    --ga-format)     GA_FORMAT_OVERRIDE="$2";  EXPLICIT+=(ga_format);   shift 2 ;;
+    --s1-mode)       export GA_S1_MODE="$2";   EXPLICIT+=(s1_mode);     shift 2 ;;
     --s1-key)        export GA_S1_KEY="$2";    shift 2 ;;
-    --s1-spec)       export GA_S1_SPEC="$2";   shift 2 ;;
-    --wrapper)       WRAPPER_NAME="$2";        shift 2 ;;
+    --s1-spec)       export GA_S1_SPEC="$2";   EXPLICIT+=(s1_spec);     shift 2 ;;
+    --wrapper)       WRAPPER_NAME="$2";        EXPLICIT+=(wrapper);     shift 2 ;;
     --v2)            USE_V2=true;           shift ;;
     --sequential)    PARALLEL=false;        shift ;;
     --max-parallel)  MAX_PARALLEL="$2";     shift 2 ;;
@@ -121,20 +130,96 @@ while [[ "$#" -gt 0 ]]; do
     --max-iter)      MAX_ITER="$2";         shift 2 ;;
     --rerun-failures) RERUN_FAILURES="$2"; shift 2 ;;
     --ab-test)       AB_TEST=true;        shift ;;
+    --resume)        RESUME_RUN="$2";     shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
+# ── Resume mode: continue an interrupted run in place ───────────────
+# Reuses the existing results/run-<timestamp>/ directory and tells the category
+# workers to skip any scenario×condition pair that already has a completed
+# (non-error) raw result. Everything else — wrapper, models, conditions — must be
+# passed again exactly as on the original invocation.
+if [[ -n "$RESUME_RUN" ]]; then
+  [[ "$RESUME_RUN" = /* ]] || RESUME_RUN="$SCRIPT_DIR/results/$RESUME_RUN"
+  if [[ ! -d "$RESUME_RUN/raw" ]]; then
+    echo -e "${RED}ERROR: no raw/ directory in $RESUME_RUN — nothing to resume.${NC}" >&2
+    exit 1
+  fi
+  RUN_DIR="$RESUME_RUN"
+  RAW_DIR="$RUN_DIR/raw"
+  TIMESTAMP="$(basename "$RUN_DIR")"; TIMESTAMP="${TIMESTAMP#run-}"
+  export SKIP_EXISTING=1
+
+  # Reload the configuration the run was started with. Anything that changes what the
+  # results MEASURE (wrapper, models, System 1 mode/spec) is taken from the saved config;
+  # an explicit flag that disagrees is an error, because mixing configurations inside one
+  # run silently corrupts every figure in its report. --condition and --category only
+  # narrow the work and may be given freely.
+  RESUME_CONFIG="$RUN_DIR/run-config.json"
+  if [[ -f "$RESUME_CONFIG" ]]; then
+    _cfg=$(node -e "
+      const c = JSON.parse(require('fs').readFileSync('$RESUME_CONFIG','utf8'));
+      const g = k => c[k] == null ? '' : String(c[k]);
+      console.log([g('wrapper'), g('model'), g('ga_model'), g('ga_endpoint'), g('ga_format'), g('s1_mode'), g('s1_spec'), g('v2')].join('|'));
+    ")
+    IFS='|' read -r _c_wrapper _c_model _c_ga_model _c_ga_endpoint _c_ga_format _c_s1_mode _c_s1_spec _c_v2 <<< "$_cfg" || true
+    _conflict=""
+    _check() { # name saved current
+      local name="$1" saved="$2" current="$3"
+      for e in "${EXPLICIT[@]:-}"; do
+        if [[ "$e" == "$name" && "$saved" != "$current" ]]; then
+          _conflict+="  --${name//_/-}: run was started with '${saved:-<default>}', you passed '${current}'\n"
+        fi
+      done
+    }
+    _check wrapper     "$_c_wrapper"     "$WRAPPER_NAME"
+    _check model       "$_c_model"       "$MODEL_OVERRIDE"
+    _check ga_model    "$_c_ga_model"    "$GA_MODEL_OVERRIDE"
+    _check ga_endpoint "$_c_ga_endpoint" "$GA_ENDPOINT_OVERRIDE"
+    _check ga_format   "$_c_ga_format"   "$GA_FORMAT_OVERRIDE"
+    _check s1_mode     "$_c_s1_mode"     "${GA_S1_MODE:-}"
+    _check s1_spec     "$_c_s1_spec"     "${GA_S1_SPEC:-}"
+    if [[ -n "$_conflict" ]]; then
+      echo -e "${RED}ERROR: --resume configuration conflict. A resumed run must use the configuration it was started with:${NC}" >&2
+      echo -e "$_conflict" >&2
+      echo "  Drop the conflicting flag(s) to resume, or start a new run for a different configuration." >&2
+      exit 1
+    fi
+    WRAPPER_NAME="${_c_wrapper:-default}"
+    MODEL_OVERRIDE="$_c_model"
+    GA_MODEL_OVERRIDE="$_c_ga_model"
+    GA_ENDPOINT_OVERRIDE="$_c_ga_endpoint"
+    GA_FORMAT_OVERRIDE="$_c_ga_format"
+    [[ -n "$_c_s1_mode" ]] && export GA_S1_MODE="$_c_s1_mode"
+    [[ -n "$_c_s1_spec" ]] && export GA_S1_SPEC="$_c_s1_spec"
+    [[ "$_c_v2" == "true" ]] && USE_V2=true
+    echo "Resuming with the saved configuration from $(basename "$RUN_DIR")/run-config.json"
+  else
+    echo -e "${YELLOW}WARNING: $RUN_DIR has no run-config.json (started by an older harness).${NC}" >&2
+    echo -e "${YELLOW}         Pass EVERY flag the original invocation used (wrapper, models, --s1-mode, --s1-spec) or the continuation will run under a different configuration.${NC}" >&2
+  fi
+fi
+
 # ── Auto-load GA model config from .ga-models.json if no overrides ──
 GA_MODELS_FILE="$HOME/.claude/hooks/.ga-models.json"
-if [[ -z "$GA_MODEL_OVERRIDE" && -f "$GA_MODELS_FILE" ]]; then
+if [[ ( -z "$GA_MODEL_OVERRIDE" || ( -n "$RESUME_CONFIG" && -z "$GA_KEY_OVERRIDE" ) ) && -f "$GA_MODELS_FILE" ]]; then
+  # Fresh run: the active profile. Resume: the profile whose model matches the saved
+  # config (its key/endpoint/format are needed; the model name alone is not enough).
   _ga_config=$(node -e "
     const c = JSON.parse(require('fs').readFileSync('$GA_MODELS_FILE','utf8'));
-    const m = c.active && c.models?.[c.active];
-    if (m) console.log([m.model, m.key||'', m.endpoint||'', m.format||'', m.options?JSON.stringify(m.options):''].join('\t'));
-  " 2>/dev/null)
+    const want = process.argv[1];
+    const m = want
+      ? Object.values(c.models || {}).find(p => p.model === want)
+      : (c.active && c.models?.[c.active]);
+    if (m) console.log([m.model, m.key||'', m.endpoint||'', m.format||'', m.options?JSON.stringify(m.options):''].join('|'));
+  " "$GA_MODEL_OVERRIDE" 2>/dev/null)
+  if [[ -n "$GA_MODEL_OVERRIDE" && -z "$_ga_config" ]]; then
+    echo -e "${RED}ERROR: resumed run used GA model '$GA_MODEL_OVERRIDE' but no profile in $GA_MODELS_FILE has that model; pass --ga-key/--ga-endpoint/--ga-format explicitly.${NC}" >&2
+    exit 1
+  fi
   if [[ -n "$_ga_config" ]]; then
-    IFS=$'\t' read -r GA_MODEL_OVERRIDE GA_KEY_OVERRIDE GA_ENDPOINT_OVERRIDE GA_FORMAT_OVERRIDE GA_OPTIONS_OVERRIDE <<< "$_ga_config" || true
+    IFS='|' read -r GA_MODEL_OVERRIDE GA_KEY_OVERRIDE GA_ENDPOINT_OVERRIDE GA_FORMAT_OVERRIDE GA_OPTIONS_OVERRIDE <<< "$_ga_config" || true
     export GA_OPTIONS_OVERRIDE
   fi
 fi
@@ -205,7 +290,7 @@ if [[ -n "$RERUN_FAILURES" ]]; then
   [[ "$AB_TEST" == "true" ]] && echo "  Wrapper D: alternative"
   echo "  Agent model: ${MODEL_OVERRIDE:-claude-haiku-4-5-20251001}"
   echo "  GA model:    ${GA_MODEL_OVERRIDE:-claude-haiku-4-5-20251001}"
-  echo "  System 1:    jev (${GA_S1_MODE:-enforce})$([[ -z "${GA_S1_KEY:-}" ]] && echo ' — NO KEY, deferring all')"
+  echo "  System 1:    jev (${GA_S1_MODE:-enforce}), spec ${GA_S1_SPEC:-system1-unified}$([[ -z "${GA_S1_KEY:-}" ]] && echo ' — NO KEY, deferring all')"
   echo "═══════════════════════════════════════════════════════"
   echo ""
 
@@ -361,6 +446,28 @@ if [[ "$CONDITIONS_CSV" == *"D"* && -f "$DEFAULT_WRAPPER" && -f "$ALT_WRAPPER" ]
   fi
 fi
 
+# ── Record the run configuration ─────────────────────────────────────
+# Written once, at the start, so --resume (and anyone reading the results later)
+# knows exactly what this run measures. Keys are never written here.
+if [[ -z "$RESUME_RUN" && "$OPTIMIZE" != "true" ]]; then
+  mkdir -p "$RUN_DIR"
+  _s1_key_present=false; [[ -n "${GA_S1_KEY:-}" ]] && _s1_key_present=true
+  _sequential=false;     [[ "$PARALLEL" == "false" ]] && _sequential=true
+  node -e "
+    const fs = require('fs');
+    const cfg = {
+      run: 'run-$TIMESTAMP', started: new Date().toISOString(),
+      conditions: '$CONDITIONS_CSV', categories: process.argv.slice(1),
+      wrapper: '$WRAPPER_NAME', alternative_wrapper: 'alternative',
+      model: '${MODEL_OVERRIDE}' || null, ga_model: '${GA_MODEL_OVERRIDE}' || null,
+      ga_endpoint: '${GA_ENDPOINT_OVERRIDE}' || null, ga_format: '${GA_FORMAT_OVERRIDE}' || null,
+      s1_mode: '${GA_S1_MODE:-enforce}', s1_spec: '${GA_S1_SPEC:-system1-unified}', s1_key_present: $_s1_key_present,
+      v2: $USE_V2, sequential: $_sequential,
+    };
+    fs.writeFileSync('$RUN_DIR/run-config.json', JSON.stringify(cfg, null, 2) + '\n');
+  " "${SCENARIO_DIRS[@]}"
+fi
+
 # ── Preflight ─────────────────────────────────────────────────────────
 MODE_LABEL="parallel"
 [[ "$PARALLEL" == "false" ]] && MODE_LABEL="sequential"
@@ -377,11 +484,13 @@ echo "  Wrapper: $WRAPPER_NAME"
 echo "  Agent model: $AGENT_DISPLAY"
 echo "  GA model:    $GA_DISPLAY"
 [[ -n "$GA_ENDPOINT_OVERRIDE" ]] && echo "  GA endpoint: $GA_ENDPOINT_OVERRIDE"
+echo "  System 1:    jev (${GA_S1_MODE:-enforce}), spec ${GA_S1_SPEC:-system1-unified}$([[ -z "${GA_S1_KEY:-}" ]] && echo ' — NO KEY, deferring all')"
 [[ -n "$CATEGORY_FILTER" ]] && echo "  Category: $CATEGORY_FILTER"
 [[ -n "$CONDITION_FILTER" ]] && echo "  Condition: $CONDITION_FILTER"
 [[ -n "$SCENARIO_FILTER" ]] && echo "  Scenario: $SCENARIO_FILTER"
 [[ "$OPTIMIZE" == "true" ]] && echo "  Optimization: enabled (max $MAX_ITER iterations)"
 [[ -n "$RERUN_FAILURES" ]] && echo "  Rerun failures from: $(basename "$RERUN_FAILURES")"
+[[ -n "$RESUME_RUN" ]] && echo "  Resuming: $(basename "$RUN_DIR") ($(find "$RAW_DIR" -name "*.json" | wc -l | tr -d " ") results already present)"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 
@@ -515,7 +624,7 @@ elif [[ "$PARALLEL" == "true" ]]; then
     bash "$SCRIPT_DIR/run-category.sh" \
       "$CATEGORY" "$MOCK_PORT" "$RAW_DIR" "$NETWORK" "$MODEL_OVERRIDE" "$CONDITIONS_CSV" "$WRAPPER_NAME" "$RATE_LIMIT_DIR" \
       "$GA_MODEL_OVERRIDE" "$GA_KEY_OVERRIDE" "$GA_ENDPOINT_OVERRIDE" "$GA_FORMAT_OVERRIDE" \
-      > "$LOG_FILE" &
+      >> "$LOG_FILE" &
 
     WORKER_PIDS+=($!)
     ACTIVE_PIDS+=($!)

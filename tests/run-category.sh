@@ -120,6 +120,7 @@ status "Found ${#SCENARIOS[@]} scenarios × ${#CONDITIONS[@]} conditions = $TOTA
 # ── Run scenarios ─────────────────────────────────────────────────────
 PASS=0
 FAIL=0
+SKIPPED=0
 IDX=0
 
 for SCENARIO_PATH in "${SCENARIOS[@]}"; do
@@ -127,6 +128,18 @@ for SCENARIO_PATH in "${SCENARIOS[@]}"; do
 
   for CONDITION in "${CONDITIONS[@]}"; do
     (( IDX++ )) || true
+
+    # Resume support: skip pairs that already have a completed (non-error) result.
+    if [[ "${SKIP_EXISTING:-}" == "1" ]]; then
+      SAFE_ID="${REL//\//__}"; SAFE_ID="${SAFE_ID%.json}"
+      EXISTING="$RAW_DIR/${SAFE_ID}--${CONDITION}.json"
+      if [[ -f "$EXISTING" ]] && node -e "process.exit(require('$EXISTING').error ? 1 : 0)" 2>/dev/null; then
+        status "[${IDX}/${TOTAL}] ${REL} × Condition ${CONDITION} — skipped (already complete)"
+        (( SKIPPED++ )) || true
+        continue
+      fi
+    fi
+
     status ""
     status "[${IDX}/${TOTAL}] ${REL} × Condition ${CONDITION}"
 
@@ -178,7 +191,7 @@ done
 
 # ── Summary ───────────────────────────────────────────────────────────
 status ""
-status "═══ $CATEGORY_DIR complete: $PASS passed, $FAIL failed (of $TOTAL) ═══"
+status "═══ $CATEGORY_DIR complete: $PASS passed, $FAIL failed, $SKIPPED skipped (of $TOTAL) ═══"
 
 # Write exit code for parent to check
 RUN_PARENT="$(dirname "$RAW_DIR")"

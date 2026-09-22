@@ -17,7 +17,7 @@
  *                                          toward the Escalation Rate, not FP/FN
  *
  * Two variables get optimized: the System 2 wrapper prompt (wrappers/default.txt)
- * and the System 1 questions + policy (wrappers/system1.json).
+ * and the System 1 spec + policy (wrappers/system1-unified.json by default).
  */
 
 const fs   = require('fs');
@@ -111,12 +111,17 @@ function loadWrapper(name = 'default') {
   return fs.readFileSync(filePath, 'utf8');
 }
 
-// System 1 spec: GA_S1_SPEC selects wrappers/<name>.json (default: system1).
+// System 1 spec: GA_S1_SPEC selects wrappers/<name>.json.
+// Default: system1-unified — the spec production installs (install.js copies it to
+// ga-system1.json), so a trial run with no flags measures what production runs.
+// The legacy multi-question spec (system1.json) is opt-in via --s1-spec system1.
 // Inside the trial container the wrappers are mounted at /wrappers.
+const DEFAULT_S1_SPEC = 'system1-unified';
+function system1SpecName() { return process.env.GA_S1_SPEC || DEFAULT_S1_SPEC; }
 let _system1Spec;
 function loadSystem1Spec() {
   if (_system1Spec !== undefined) return _system1Spec;
-  const name = process.env.GA_S1_SPEC || 'system1';
+  const name = system1SpecName();
   const candidates = [`/wrappers/${name}.json`, path.join(WRAPPERS_DIR, `${name}.json`)];
   _system1Spec = null;
   for (const candidate of candidates) {
@@ -430,5 +435,4 @@ module.exports = {
   EXEMPT_TOOLS:              system0.EXEMPT_TOOLS,
   ALWAYS_ESCALATE_TOOLS:     system0.ALWAYS_ESCALATE_TOOLS,
   DESTRUCTIVE_BASH_PATTERNS: system0.DESTRUCTIVE_BASH_PATTERNS,
-  SENSITIVE_FILE_PATTERNS:   system0.SENSITIVE_FILE_PATTERNS,
-};
+  SENSITIVE_FILE_PATTERNS:   system0.SENSITIVE_FILE_PATTERNS, system1SpecName };
