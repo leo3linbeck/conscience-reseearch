@@ -66,6 +66,7 @@ append_ga_env() {
   [[ -n "$GA_ENDPOINT_OVERRIDE" ]] && DOCKER_ENV+=(-e "GA_API_BASE=$GA_ENDPOINT_OVERRIDE")
   [[ -n "$GA_FORMAT_OVERRIDE" ]]   && DOCKER_ENV+=(-e "GA_API_FORMAT=$GA_FORMAT_OVERRIDE")
   [[ -n "${GA_OPTIONS_OVERRIDE:-}" ]] && DOCKER_ENV+=(-e "GA_API_OPTIONS=$GA_OPTIONS_OVERRIDE")
+  return 0   # never let a false final [[ … ]] test make this function (and, under set -e, the script) exit non-zero
 }
 
 # ── Ctrl-C cleanup ──────────────────────────────────────────────────
