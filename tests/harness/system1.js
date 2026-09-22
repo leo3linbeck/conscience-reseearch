@@ -36,7 +36,6 @@ const path = require('path');
 const DEFAULT_ENDPOINT   = 'https://api.typesafe.ai';
 const DEFAULT_MODEL      = 'jev-latest';
 const DEFAULT_TIMEOUT_MS = 4_000;
-const MAX_FIELD_CHARS    = 6_000;   // per string field in the state
 const MAX_FILES          = 4;       // referenced files included in the state
 const MAX_HISTORY        = 12;      // earlier tool calls included in the state
 
@@ -80,49 +79,9 @@ function loadSystem1Spec(specPath) {
 }
 
 // ── Redaction ────────────────────────────────────────────────────────
-// The state leaves the machine. Replace obvious secrets with a marker so the
-// judge still sees THAT a secret is present without receiving the secret.
-
-const SECRET_PATTERNS = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-  /\bsk-ant-[A-Za-z0-9_-]{16,}/g,
-  /\bsk-[A-Za-z0-9_-]{20,}/g,
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}/g,
-  /\bgithub_pat_[A-Za-z0-9_]{30,}/g,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /\bAIza[0-9A-Za-z_-]{30,}/g,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
-  /(\b(?:authorization|bearer)\b["']?\s*[:=]?\s*["']?(?:bearer\s+)?)[A-Za-z0-9._~+\/-]{20,}/gi,
-  /(\b(?:api[_-]?key|secret|token|passwd|password)\b["']?\s*[:=]\s*["']?)[^\s"']{12,}/gi,
-];
-
-function redactSecrets(text) {
-  let out = String(text);
-  for (const pattern of SECRET_PATTERNS) {
-    out = out.replace(pattern, (match, prefix) =>
-      (typeof prefix === 'string' ? prefix : '') + '[REDACTED_SECRET]');
-  }
-  return out;
-}
-
-function clip(text) {
-  const s = String(text);
-  if (s.length <= MAX_FIELD_CHARS) return s;
-  const half = Math.floor(MAX_FIELD_CHARS / 2);
-  return `${s.slice(0, half)}\n[… ${s.length - MAX_FIELD_CHARS} characters omitted …]\n${s.slice(-half)}`;
-}
-
-function sanitize(value) {
-  if (typeof value === 'string') return clip(redactSecrets(value));
-  if (Array.isArray(value)) return value.map(sanitize);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = sanitize(v);
-    return out;
-  }
-  return value;
-}
+// Lives in redact.js: the same code runs at the edge (client adapter) and on
+// ingest (service). Re-exported below so existing consumers keep working.
+const { redactSecrets, clip, sanitize, MAX_FIELD_CHARS } = require('./redact');
 
 // ── State ────────────────────────────────────────────────────────────
 // Named JSON fields, so questions can point at `action`, `principal_request`
@@ -454,6 +413,9 @@ module.exports = {
   VIOLATIONS,
   describeStrand,
   redactSecrets,
+  sanitize,
+  clip,
+  MAX_FIELD_CHARS,
   DEFAULT_ENDPOINT,
   DEFAULT_MODEL,
 };

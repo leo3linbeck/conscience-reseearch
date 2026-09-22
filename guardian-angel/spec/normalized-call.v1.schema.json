@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://guardian-angel.dev/spec/normalized-call.v1.schema.json",
+  "title": "NormalizedCall v1",
+  "description": "What a Guardian Angel client adapter sends the service for a tool call that System 0 escalated. Every field is computed on the principal's machine; the service verifies nothing it cannot see. Strings are redacted and clipped at the edge (redact.js) and re-redacted on ingest.",
+  "type": "object",
+  "required": ["v", "harness", "tool_name", "tool_input"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": 1 },
+    "harness": { "type": "string", "description": "Which runtime produced the call: claude-code | codex | gemini-cli | trial | …" },
+    "client_version": { "type": "string" },
+    "core_sha": { "type": "string", "description": "conscience-research commit the client's System 0 and context code were vendored from" },
+    "session_id": { "type": "string" },
+    "call_id": { "type": "string", "description": "sha256(tool_name + canonical tool_input), first 16 hex chars. Lets a principal's approval be matched to the exact call." },
+    "tool_name": { "type": "string" },
+    "tool_input": { "type": "object" },
+    "principal_request": { "type": "string", "maxLength": 2000, "description": "The most recent instruction the principal typed" },
+    "history": {
+      "type": "array", "maxItems": 12,
+      "items": {
+        "type": "object", "required": ["tool", "summary"], "additionalProperties": false,
+        "properties": {
+          "tool": { "type": "string" },
+          "summary": { "type": "string", "maxLength": 200 },
+          "verdict": { "type": "string", "enum": ["APPROVE", "REJECT", "ESCALATE"] },
+          "output": { "type": "string", "maxLength": 200, "description": "Start of what the call printed. Untrusted environment data." }
+        }
+      }
+    },
+    "cwd": { "type": "string" },
+    "reflex_flags": { "type": "array", "items": { "type": "string" }, "description": "What System 0 noticed but could not decide on" },
+    "file_meta": { "$ref": "#/$defs/fileFacts", "description": "For Write/Edit: version-control facts about the target" },
+    "write_targets": { "type": "array", "items": { "$ref": "#/$defs/fileFacts" }, "description": "For Bash: files the command would overwrite or destroy" },
+    "referenced_files": {
+      "type": "array", "maxItems": 4,
+      "items": {
+        "type": "object", "required": ["path", "content"], "additionalProperties": false,
+        "properties": { "path": { "type": "string" }, "content": { "type": "string", "maxLength": 12000 } }
+      },
+      "description": "Scripts the command would run, resolved locally (DAG flattening). Path may carry an annotation such as ' (heredoc)'."
+    },
+    "referenced_files_omitted": { "type": "integer", "minimum": 0 },
+    "unresolved_files": { "type": "array", "items": { "type": "string" }, "description": "Scripts the command would run whose contents could not be read" },
+    "download": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "flags": { "type": "array", "items": { "type": "string" } },
+        "downloads": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  },
+  "$defs": {
+    "fileFacts": {
+      "type": "object", "required": ["path"], "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "exists": { "type": "boolean" },
+        "in_git_repo": { "type": "boolean" },
+        "git_tracked": { "type": "boolean" },
+        "has_staged_changes": { "type": "boolean" },
+        "looks_sensitive": { "type": "boolean" },
+        "sensitive_reason": { "type": "string" }
+      }
+    }
+  }
+}

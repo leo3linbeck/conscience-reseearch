@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://guardian-angel.dev/spec/verdict.v1.schema.json",
+  "title": "Verdict v1",
+  "description": "What the Guardian Angel service returns for a NormalizedCall. Computed server-side from a versioned prompt; the client cannot assert a verdict.",
+  "type": "object",
+  "required": ["v", "verdict_id", "decision", "tier", "reason"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": 1 },
+    "verdict_id": { "type": "string" },
+    "decision": { "type": "string", "enum": ["APPROVE", "REJECT", "ESCALATE"] },
+    "tier": { "type": "string", "enum": ["system1", "system2", "service"], "description": "system1/system2: the tier that decided. service: the ladder fell through (System 2 down) and the service routed to the principal or rejected." },
+    "reason": { "type": "string" },
+    "trail": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "system1": { "type": ["object", "null"] },
+        "system2": { "type": ["object", "null"] }
+      }
+    },
+    "prompt_version": { "type": "string" },
+    "thresholds_version": { "type": "string" },
+    "escalation_id": { "type": "string", "description": "Present when decision is ESCALATE" },
+    "timing": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "system1_ms": { "type": "integer" }, "system2_ms": { "type": "integer" }, "total_ms": { "type": "integer" }
+      }
+    }
+  }
+}

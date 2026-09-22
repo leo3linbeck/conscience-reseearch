@@ -26,7 +26,9 @@ const { withRateLimit } = require('./rate-limiter');
 
 const system0 = require('./system0');
 const system1 = require('./system1');
-const { resolveReferencedFiles, assessDownloads, buildSystem2UserMessage, extractDecisionJSON } = require('./context');
+const { resolveReferencedFiles, assessDownloads } = require('./context-client');
+const { buildSystem2UserMessage, extractDecisionJSON } = require('./context-server');
+const { buildNormalizedCall, callFromNormalized } = require('./normalize');
 
 const { checkSystem0, resolveFileMetadata } = system0;
 
@@ -333,8 +335,17 @@ async function evaluateWithWrapper(wrapperText, toolName, toolInput, userPrompt,
   // Files a Bash command would overwrite/destroy, with version-control facts, so the
   // reversibility test applies to Bash and not only to Write/Edit.
   const writeTargets = system0.resolveBashWriteTargets(toolName, toolInput, toolCwd);
-  const call = { toolName, toolInput, principalRequest: userPrompt, fileMeta, writeTargets, resolvedFiles, reflexFlags, history: opts.history || [],
-                 frameworkPrompt: wrapperText };   // unified System 1 spec: same prompt as System 2
+  // The facts gathered above are what a client adapter sends the service: build the
+  // NormalizedCall v1 wire object (guardian-angel/spec/normalized-call.v1.schema.json)
+  // and unpack it into the `call` the tiers consume. In the trial the round trip is
+  // lossless (no edge redaction — the tiers redact for themselves as they always have),
+  // so verdicts stay byte-identical to the validated runs while the wire format is
+  // exercised on every call. opts.redactAtEdge = true measures the service path.
+  const normalized = buildNormalizedCall({
+    toolName, toolInput, principalRequest: userPrompt, history: opts.history || [], cwd: toolCwd,
+    reflexFlags, fileMeta, writeTargets, resolvedFiles, unresolved, download, harness: 'trial',
+  }, { redact: opts.redactAtEdge === true || process.env.GA_REDACT_AT_EDGE === '1' });
+  const call = callFromNormalized(normalized, wrapperText);   // unified System 1 spec: same prompt as System 2
 
   // ── System 2 (defined here so shadow mode can run it alongside System 1) ──
   const model = opts.model || process.env.GA_MODEL || _modelsConfig?.model || DEFAULT_MODEL;

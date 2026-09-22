@@ -33,7 +33,11 @@
  *   ~/.claude/hooks/ga-lib/
  *     system0.js                             — reflex: approve / reject patterns, escalation flags, file metadata
  *     system1.js                             — intuition: jev client, redaction, convergence policy
- *     context.js                             — script resolution (DAG flattening), System 2 message
+ *     context.js                             — re-exports the two halves below
+ *     context-client.js                      — script resolution (DAG flattening), downloads   [client side]
+ *     context-server.js                      — System 2 briefing, verdict parsing              [service side]
+ *     redact.js                              — secret redaction, shared by edge and ingest
+ *     normalize.js                           — NormalizedCall v1 build / unpack
  *
  * Architecture:
  *   - guardian-angel.template.js is installed VERBATIM. install.js never patches it.
@@ -123,7 +127,11 @@ const MANIFEST = [
   { src: path.join(WRAPPERS_DIR, 'system1-unified.json'), dst: path.join(HOOKS_DIR, 'ga-system1.json'), label: 'System 1 spec (unified: jev judges under the same morality prompt as System 2)' },
   { src: path.join(HARNESS_DIR, 'system0.js'),    dst: path.join(GA_LIB_DIR, 'system0.js'),           label: 'System 0 module (reflex)' },
   { src: path.join(HARNESS_DIR, 'system1.js'),    dst: path.join(GA_LIB_DIR, 'system1.js'),           label: 'System 1 module (jev)' },
-  { src: path.join(HARNESS_DIR, 'context.js'),    dst: path.join(GA_LIB_DIR, 'context.js'),           label: 'Context module' },
+  { src: path.join(HARNESS_DIR, 'context.js'),    dst: path.join(GA_LIB_DIR, 'context.js'),           label: 'Context module (re-exports client + server halves)' },
+  { src: path.join(HARNESS_DIR, 'context-client.js'), dst: path.join(GA_LIB_DIR, 'context-client.js'), label: 'Context module, client half (script resolution, downloads)' },
+  { src: path.join(HARNESS_DIR, 'context-server.js'), dst: path.join(GA_LIB_DIR, 'context-server.js'), label: 'Context module, server half (System 2 briefing, verdict parsing)' },
+  { src: path.join(HARNESS_DIR, 'redact.js'),     dst: path.join(GA_LIB_DIR, 'redact.js'),            label: 'Secret redaction (edge + ingest)' },
+  { src: path.join(HARNESS_DIR, 'normalize.js'),  dst: path.join(GA_LIB_DIR, 'normalize.js'),         label: 'NormalizedCall v1 (wire format between adapter and service)' },
   { src: TEMPLATE_PATH,                           dst: HOOK_DST,                                      label: 'Hook script' },
 ];
 
