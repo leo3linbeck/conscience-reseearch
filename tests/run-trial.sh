@@ -108,12 +108,13 @@ AB_TEST=false
 RESUME_RUN=""
 EXPLICIT=()           # flags given on the command line (checked against a resumed run's saved config)
 RESUME_CONFIG=""
+RESUME_CATEGORIES=""   # comma-separated category list restored from a resumed run's config
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
-    --condition)     CONDITION_FILTER="$2"; shift 2 ;;
+    --condition)     CONDITION_FILTER="$2"; EXPLICIT+=(condition); shift 2 ;;
     --scenario)      SCENARIO_FILTER="$2";  shift 2 ;;
-    --category)      CATEGORY_FILTER="$2";  shift 2 ;;
+    --category)      CATEGORY_FILTER="$2";  EXPLICIT+=(category);  shift 2 ;;
     --model)         MODEL_OVERRIDE="$2";       EXPLICIT+=(model);       shift 2 ;;
     --ga-model)      GA_MODEL_OVERRIDE="$2";   EXPLICIT+=(ga_model);    shift 2 ;;
     --ga-key)        GA_KEY_OVERRIDE="$2";     shift 2 ;;
@@ -161,9 +162,10 @@ if [[ -n "$RESUME_RUN" ]]; then
     _cfg=$(node -e "
       const c = JSON.parse(require('fs').readFileSync('$RESUME_CONFIG','utf8'));
       const g = k => c[k] == null ? '' : String(c[k]);
-      console.log([g('wrapper'), g('model'), g('ga_model'), g('ga_endpoint'), g('ga_format'), g('s1_mode'), g('s1_spec'), g('v2')].join('|'));
+      const cats = Array.isArray(c.categories) ? c.categories.join(',') : '';
+      console.log([g('wrapper'), g('model'), g('ga_model'), g('ga_endpoint'), g('ga_format'), g('s1_mode'), g('s1_spec'), g('v2'), g('conditions'), cats].join('|'));
     ")
-    IFS='|' read -r _c_wrapper _c_model _c_ga_model _c_ga_endpoint _c_ga_format _c_s1_mode _c_s1_spec _c_v2 <<< "$_cfg" || true
+    IFS='|' read -r _c_wrapper _c_model _c_ga_model _c_ga_endpoint _c_ga_format _c_s1_mode _c_s1_spec _c_v2 _c_conditions _c_categories <<< "$_cfg" || true
     _conflict=""
     _check() { # name saved current
       local name="$1" saved="$2" current="$3"
@@ -194,6 +196,12 @@ if [[ -n "$RESUME_RUN" ]]; then
     [[ -n "$_c_s1_mode" ]] && export GA_S1_MODE="$_c_s1_mode"
     [[ -n "$_c_s1_spec" ]] && export GA_S1_SPEC="$_c_s1_spec"
     [[ "$_c_v2" == "true" ]] && USE_V2=true
+    # Conditions and categories: the saved set unless narrowed explicitly on the command line.
+    # (Without this, a bare --resume would fall back to the A,B,C,D default and run conditions
+    # the original run never asked for.)
+    _given() { for e in "${EXPLICIT[@]:-}"; do [[ "$e" == "$1" ]] && return 0; done; return 1; }
+    if ! _given condition && [[ -n "$_c_conditions" ]]; then CONDITION_FILTER="$_c_conditions"; fi
+    if ! _given category && [[ -n "$_c_categories" ]]; then RESUME_CATEGORIES="$_c_categories"; fi
     echo "Resuming with the saved configuration from $(basename "$RUN_DIR")/run-config.json"
   else
     echo -e "${YELLOW}WARNING: $RUN_DIR has no run-config.json (started by an older harness).${NC}" >&2
@@ -416,6 +424,8 @@ fi
 
 if [[ -n "$CATEGORY_FILTER" ]]; then
   SCENARIO_DIRS=("$CATEGORY_FILTER")
+elif [[ -n "$RESUME_CATEGORIES" ]]; then
+  IFS=',' read -ra SCENARIO_DIRS <<< "$RESUME_CATEGORIES"
 fi
 
 if [[ -n "$SCENARIO_FILTER" ]]; then
