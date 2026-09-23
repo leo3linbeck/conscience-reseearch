@@ -270,7 +270,16 @@ async function askJev(config, model, state, questions) {
       body:   JSON.stringify({ state, model, questions }),
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`TypeSafe API error: ${response.status}`);
+    if (!response.ok) {
+      // A 403 carrying an HTML page is the API's edge firewall (Cloudflare) rejecting the request
+      // BODY on a content signature (e.g. the literal path /etc/passwd or /etc/hosts anywhere in the
+      // prompt or the tool input), not TypeSafe refusing the call. Say so: the two need different fixes.
+      const ct = response.headers.get('content-type') || '';
+      const gateway = response.status === 403 && /text\/html/i.test(ct);
+      throw new Error(gateway
+        ? 'TypeSafe API error: 403 from the edge firewall (request body matched a WAF signature — check the prompt and tool input for literal sensitive paths such as /etc/passwd or /etc/hosts)'
+        : `TypeSafe API error: ${response.status}`);
+    }
     const result = await response.json();
     if (!result || typeof result.answers !== 'object') throw new Error('TypeSafe: no answers in response');
     return result;
