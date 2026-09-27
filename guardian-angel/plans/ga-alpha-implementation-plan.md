@@ -656,3 +656,23 @@ button. Built as **/setup** in the service plus `ga setup` in the plugin:
   fallback, the PreToolUse hook) redeems `CLAUDE_PLUGIN_OPTION_LINK_TOKEN` once and
   reports the result into the session; `/guardian-angel:link <token>` covers a plugin
   installed earlier. The terminal `npx` path stays as the second tab.
+- **One-click link (2026-09-27, Leo preferred this to a connector):** a connector cannot
+  see Claude Code's own tools, so the plugin stays, but it now behaves like an app. On the
+  first session after install the SessionStart hook starts the device flow, opens the
+  Link page with the code filled in, and a detached poller saves the credentials when the
+  principal clicks Approve. Set up for Claude Code is three steps: two `/plugin` lines,
+  new session, Approve. The token path remains behind a disclosure. Submitting the plugin
+  to Anthropic's official directory would remove the marketplace line (later).
+
+### Harness landscape, re-checked 2026-09-27
+
+Supersedes the table in ga-service-spec.md §4.3 where they differ.
+
+| Harness | Pre-tool gate | Packaging | Same one-click link? |
+| --- | --- | --- | --- |
+| Claude Code (CLI) | PreToolUse, all tools | plugin + marketplace | yes (shipped) |
+| Gemini CLI | BeforeTool can block or rewrite | extension (`gemini extensions install <repo>`), hooks in `hooks/hooks.json`, consent prompt on install | yes — closest match to Claude Code |
+| Codex CLI | PreToolUse now covers Bash, apply_patch edits, MCP and local tools (no longer Bash-only); 10 events incl. SessionStart | TOML in `~/.codex/config.toml`; plugin system arrived March 2026 (enterprise/private marketplaces) | yes, via SessionStart; install by installer writing config until plugins suit |
+| Cursor | preToolUse allow / deny / ask (plus beforeShellExecution, beforeMCPExecution) | `hooks.json`, no marketplace | yes at first tool call; installer writes hooks.json. Reported bug: a malformed hook response silently allows — adapter must always emit valid JSON |
+| OpenCode | `tool.execute.before` in-process | TypeScript plugin (npm) | yes at first tool call |
+| Claude desktop Code tab, Cowork | hooks do not fire | — | no (deferred) |
