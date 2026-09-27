@@ -648,3 +648,11 @@ button. Built as **/setup** in the service plus `ga setup` in the plugin:
   on `/setup`. An explicit destination is still honoured, because `ga login` prints a
   `/link?code=` deep link that a first-time tester must reach to approve the waiting
   terminal, and Phase 3 push notifications will deep-link to escalations the same way.
+- **In-harness setup (2026-09-27, Leo: "Go"):** the Set up page's default tab now installs
+  from inside Claude Code: `/plugin install guardian-angel --marketplace
+  leo3linbeck/guardian-angel-plugin` (2.1.275+; two legacy commands shown for older
+  versions), paste the link token when Claude Code asks for the plugin's sensitive
+  `link_token` option, `/reload-plugins`. The plugin's SessionStart hook (and, as a
+  fallback, the PreToolUse hook) redeems `CLAUDE_PLUGIN_OPTION_LINK_TOKEN` once and
+  reports the result into the session; `/guardian-angel:link <token>` covers a plugin
+  installed earlier. The terminal `npx` path stays as the second tab.
