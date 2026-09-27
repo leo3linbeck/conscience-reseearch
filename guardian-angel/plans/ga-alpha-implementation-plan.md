@@ -644,3 +644,7 @@ button. Built as **/setup** in the service plus `ga setup` in the plugin:
   "Linked <device>". Verified end to end by `e2e/plugin.test.ts` and deployed.
 - Next for this track: the Codex CLI and Gemini CLI hook adapters behind the same
   selector, each measured through the trial harness before it is listed as available.
+- **Post-sign-in routing (2026-09-27, Leo):** an active account with no live device lands
+  on `/setup`. An explicit destination is still honoured, because `ga login` prints a
+  `/link?code=` deep link that a first-time tester must reach to approve the waiting
+  terminal, and Phase 3 push notifications will deep-link to escalations the same way.
