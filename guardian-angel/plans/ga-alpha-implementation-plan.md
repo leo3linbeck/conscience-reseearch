@@ -623,3 +623,24 @@ escalation and reports `approved`. §5.3 is superseded by this.
 4. Register OAuth apps: Google, GitHub, Facebook, and Apple (Services ID) with callback
    `https://ga.linbeck.app/auth/<id>/callback`; Apple also needs the `.p8` key.
 5. Phase 3: web push (VAPID keys) + Resend; then invite Javier.
+
+## 17. One-button setup (2026-09-27)
+
+Leo asked for a deployment flow where a tester picks a harness and deploys with one
+button. Built as **/setup** in the service plus `ga setup` in the plugin:
+
+- The page lists harnesses. Claude Code is available; Codex CLI, Gemini CLI, Cursor and
+  OpenCode are shown as coming soon. The Claude and ChatGPT apps and Cowork are
+  **deferred**: neither app exposes a pre-tool hook to plugins (only the MCP-proxy
+  connector shape reaches them, and Cowork's plugin hooks are registered but do not
+  fire, per claude-code issues #45514, #63360, #63047).
+- The button mints a single-use, ten-minute **link token** (`gal_…`, hash stored, bound
+  to principal and harness) and shows one command:
+  `npx --yes github:leo3linbeck/guardian-angel-plugin setup --harness claude-code --token gal_… --service https://ga.linbeck.app`.
+  It runs the plugin's `ga` straight from GitHub (inspectable; deliberately not a
+  `curl | sh`, which System 0 rejects), installs the plugin with the terminal
+  `claude plugin marketplace add` / `claude plugin install --yes` commands, and redeems
+  the token at `POST /api/v1/device/redeem` for credentials. The page polls and reports
+  "Linked <device>". Verified end to end by `e2e/plugin.test.ts` and deployed.
+- Next for this track: the Codex CLI and Gemini CLI hook adapters behind the same
+  selector, each measured through the trial harness before it is listed as available.
